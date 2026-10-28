@@ -1,0 +1,367 @@
+// Local Audiobook UI: library, paginated reader with play + faint highlight, voices, speed log, storage.
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const api = async (path, body) => {
+  const r = await fetch(path, body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.status);
+  return j;
+};
+const store = {get: (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
+               set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }};
+const fmtS = s => s == null ? "–" : s < 90 ? `${s.toFixed(1)} s` : s < 5400 ? `${(s / 60).toFixed(1)} min` : `${(s / 3600).toFixed(1)} h`;
+const fmtB = b => b < 1e6 ? `${(b / 1e3).toFixed(0)} KB` : b < 1e9 ? `${(b / 1e6).toFixed(1)} MB` : `${(b / 1e9).toFixed(2)} GB`;
+const day = t => new Date(t * 1000).toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"});
+const CHARS_PER_AUDIO_S = 4.2;   // Chinese narration, measured on Ming 0.5B; only used for estimates
+
+let S = {presets: [], backends: {}}, view = "library";
+
+// ---------------- nav ----------------
+function show(v) {
+  view = v;
+  document.querySelectorAll("#nav button").forEach(b => b.classList.toggle("on", b.dataset.view === v));
+  document.querySelectorAll(".view").forEach(s => s.classList.toggle("on", s.id === v));
+  ({library: loadLibrary, voices: renderVoices, bench: loadBench, storage: loadStorage, reader: () => R.book && layout()}[v])();
+}
+document.querySelectorAll("#nav button").forEach(b => b.onclick = () => show(b.dataset.view));
+
+// ---------------- library ----------------
+async function loadLibrary() {
+  $("#libdir").textContent = `EPUBs are copied into ${S.data_dir}/books`;
+  const books = await api("/api/library");
+  $("#books").innerHTML = books.length ? books.map(b => {
+    const pct = b.progress ? Math.round(100 * (b.progress.ch + 1) / b.chapters) : 0;
+    return `<div class="book" data-id="${b.id}"><div class="cv" style="background-image:url('/api/cover?book=${b.id}')"></div>
+      <div class="t">${esc(b.title)}</div><div class="a">${esc(b.author)} · ${(b.chars / 1e4).toFixed(1)}万字</div>
+      <div class="pg"><i style="width:${pct}%"></i></div></div>`;
+  }).join("") : `<p class="muted">No books yet. Scan this Mac to gather your EPUBs here.</p>`;
+  document.querySelectorAll(".book").forEach(el => el.onclick = () => openBook(el.dataset.id));
+}
+
+$("#scan").onclick = async () => {
+  const box = $("#scanlist");
+  box.hidden = false;
+  box.innerHTML = `<p class="muted">Scanning (Spotlight + iCloud Books, Downloads, Documents, Desktop)…</p>`;
+  const found = await api("/api/scan", {});
+  box.innerHTML = `<table><tr><th></th><th>Title</th><th>Author</th><th class="n">Size</th><th>Where</th></tr>${found.map((f, i) => `
+    <tr><td><input type="checkbox" data-i="${i}" ${f.imported ? "disabled" : "checked"}></td><td>${esc(f.title)}${f.imported ? ' <span class="muted">(in library)</span>' : ""}</td>
+    <td>${esc(f.author)}</td><td class="n">${fmtB(f.size)}</td><td class="muted">${esc(f.path.replace(/^\/Users\/[^/]+/, "~"))}</td></tr>`).join("")}</table>
+    <div class="bar" style="margin-top:10px"><button id="doimport">Copy selected into the library</button>
+    <span class="muted">Originals stay where they are.</span></div>`;
+  $("#doimport").onclick = async () => {
+    const paths = [...box.querySelectorAll("input:checked:not(:disabled)")].map(c => found[+c.dataset.i].path);
+    $("#doimport").textContent = "Copying…";
+    await api("/api/import", {paths});
+    box.hidden = true;
+    loadLibrary();
+  };
+};
+
+// ---------------- reader ----------------
+const R = {book: null, ch: 0, page: 0, pages: 1, pageOf: {}, order: [], ready: new Set(), asked: new Set(),
+           playing: false, cur: null, waitingFor: null, map: store.get("map", true)};
+const audio = $("#audio");
+const presetId = () => $("#preset").value;
+
+async function openBook(id, keepPage) {
+  if (R.book?.id !== id) {
+    stop();
+    R.book = await api(`/api/book?id=${id}`);
+    const prog = (await api("/api/library")).find(b => b.id === id)?.progress;
+    R.ch = prog?.ch ?? 0;
+    R.resumeChunk = prog?.chunk;
+    $("#rtitle").textContent = R.book.title;
+    $("#chapter").innerHTML = R.book.chapters.map((c, i) => `<option value="${i}">${esc(c.title)}</option>`).join("");
+  }
+  show("reader");
+  renderChapter(R.ch, keepPage);
+}
+
+function renderChapter(ch, page = 0) {
+  R.ch = ch;
+  $("#chapter").value = ch;
+  const c = R.book.chapters[ch];
+  R.order = c.paras.flatMap(p => p.chunks.map(k => k.id));
+  R.text = Object.fromEntries(c.paras.flatMap(p => p.chunks.map(k => [k.id, k.t])));
+  $("#flow").innerHTML = c.paras.map(p => `<p class="${p.h ? "h" : ""}">${p.chunks.map(k =>
+    `<span class="ck" data-id="${k.id}">${esc(k.t)}</span>`).join("")}</p>`).join("");
+  R.ready = new Set();
+  layout(page === "end" ? 1e9 : page);
+  refreshReady();
+}
+
+function layout(page) {
+  const wrap = $("#pagewrap"), flow = $("#flow");
+  const W = wrap.clientWidth, gap = W > 900 ? 120 : 40, cols = W > 900 ? 2 : 1;
+  R.W = W; R.gap = gap;
+  flow.style.columnWidth = `${(W - gap * (cols - 1)) / cols}px`;
+  flow.style.columnGap = `${gap}px`;
+  flow.style.columnFill = "auto";
+  flow.style.transform = "none";
+  const wl = wrap.getBoundingClientRect().left;
+  R.pageOf = {};
+  for (const el of flow.querySelectorAll(".ck")) {
+    const r = el.getClientRects()[0];
+    if (r) R.pageOf[el.dataset.id] = Math.max(0, Math.floor((r.left - wl + 2) / (W + gap)));
+  }
+  R.pages = Math.max(1, ...Object.values(R.pageOf).map(p => p + 1));
+  if (page === undefined) page = R.cur != null && R.pageOf[R.cur] != null ? R.pageOf[R.cur] : R.page;
+  if (R.resumeChunk && R.pageOf[R.resumeChunk] != null) { page = R.pageOf[R.resumeChunk]; R.resumeChunk = null; }
+  goPage(Math.min(page, R.pages - 1), true);
+}
+
+function goPage(p, quiet) {
+  if (p < 0) { if (R.ch > 0) renderChapter(R.ch - 1, "end"); return; }
+  if (p >= R.pages) { if (R.ch < R.book.chapters.length - 1) renderChapter(R.ch + 1, 0); return; }
+  R.page = p;
+  $("#flow").style.transform = `translateX(${-p * (R.W + R.gap)}px)`;
+  $("#pageno").textContent = `${R.book.chapters[R.ch].title} · page ${p + 1} / ${R.pages}`;
+  paintReady();
+  api("/api/progress", {book: R.book.id, ch: R.ch, page: p, chunk: idsOnPages(p, p)[0]}).catch(() => {});
+}
+const idsOnPages = (a, b) => R.order.filter(id => R.pageOf[id] >= a && R.pageOf[id] <= b);
+
+$("#turnL").onclick = () => goPage(R.page - 1);
+$("#turnR").onclick = () => goPage(R.page + 1);
+$("#chapter").onchange = e => { stop(); renderChapter(+e.target.value, 0); };
+window.addEventListener("resize", () => R.book && view === "reader" && layout());
+document.addEventListener("keydown", e => {
+  if (view !== "reader" || /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+  if (e.key === "ArrowRight") goPage(R.page + 1);
+  else if (e.key === "ArrowLeft") goPage(R.page - 1);
+  else if (e.key === " ") { e.preventDefault(); togglePlay(); }
+});
+$("#flow").ondblclick = e => { const id = e.target.closest(".ck")?.dataset.id; if (id) { window.getSelection().removeAllRanges(); startAt(id); } };
+$("#map").onclick = () => { R.map = !R.map; store.set("map", R.map); paintReady(); };
+$("#preset").onchange = () => { store.set("preset", presetId()); stop(); R.asked.clear(); refreshReady(); };
+
+async function refreshReady() {
+  if (!R.book) return;
+  const {ids} = await api(`/api/ready?book=${R.book.id}&preset=${presetId()}&ch=${R.ch}`);
+  R.ready = new Set(ids);
+  paintReady();
+}
+
+function paintReady() {
+  const flow = $("#flow");
+  flow.classList.toggle("map", R.map);
+  $("#map").classList.toggle("on", R.map);
+  for (const el of flow.querySelectorAll(".ck")) {
+    const id = el.dataset.id;
+    el.classList.toggle("ok", R.ready.has(id));
+    el.classList.toggle("wait", !R.ready.has(id) && R.asked.has(id));
+    el.classList.toggle("now", id === R.cur);
+  }
+  const ids = idsOnPages(R.page, R.page);
+  $("#pagestat").textContent = `audio for this page: ${ids.filter(i => R.ready.has(i)).length} / ${ids.length}`;
+}
+
+async function request(ids, priority, label, replace) {
+  ids = ids.filter(i => !R.ready.has(i));
+  ids.forEach(i => R.asked.add(i));
+  if (!ids.length && !replace) return;
+  await api("/api/enqueue", {book: R.book.id, preset: presetId(), ids, priority, label, replace: !!replace});
+  paintReady();
+}
+
+$("#pre").onchange = async e => {
+  const v = e.target.value; e.target.value = "";
+  if (!v) return;
+  let ids, label;
+  const c = R.book.chapters[R.ch].title;
+  if (v === "page") { ids = idsOnPages(R.page, R.page); label = `${c} p.${R.page + 1}`; }
+  else if (v === "10") { ids = idsOnPages(R.page, R.page + 9); label = `${c} p.${R.page + 1}–${Math.min(R.pages, R.page + 10)}`; }
+  else if (v === "chapter") { ids = R.order; label = `${c} (whole chapter)`; }
+  else {
+    const chars = R.book.chapters.reduce((n, ch) => n + ch.paras.reduce((m, p) => m + p.chunks.reduce((k, x) => k + x.t.length, 0), 0), 0);
+    const rtf = lastRtf();
+    if (!confirm(`About ${fmtS(chars / CHARS_PER_AUDIO_S)} of audio. At the last measured RTF (${rtf ?? "?"}) that takes ~${rtf ? fmtS(chars / CHARS_PER_AUDIO_S * rtf) : "?"} of generation. Queue it in the background?`)) return;
+    for (let i = 0; i < R.book.chapters.length; i++) {
+      const ids2 = R.book.chapters[i].paras.flatMap(p => p.chunks.map(k => k.id));
+      await api("/api/enqueue", {book: R.book.id, preset: presetId(), ids: ids2, priority: 2, label: `${R.book.chapters[i].title} (book)`});
+    }
+    return;
+  }
+  await request(ids, 2, label);
+};
+
+// playback: start at the first sentence of the page (or the one double-clicked), keep `lookahead` chunks queued ahead
+function togglePlay() { R.playing ? stop() : startAt(R.cur && R.pageOf[R.cur] === R.page ? R.cur : idsOnPages(R.page, R.page)[0]); }
+$("#play").onclick = togglePlay;
+
+async function startAt(id) {
+  if (!id) return;
+  audio.pause();
+  R.playing = true;
+  $("#play").textContent = "❚❚ Pause";
+  const i = R.order.indexOf(id);
+  await request(R.order.slice(i, i + 1 + S.lookahead), 0, "play", true);
+  playChunk(id);
+}
+
+function stop() {
+  R.playing = false; R.waitingFor = null;
+  audio.pause();
+  $("#play").textContent = "▶ Play";
+  $("#playstat").textContent = "";
+}
+
+async function playChunk(id) {
+  if (!R.playing) return;
+  R.cur = id;
+  if (R.pageOf[id] !== R.page) goPage(R.pageOf[id]);
+  paintReady();
+  const i = R.order.indexOf(id);
+  request(R.order.slice(i + 1, i + 1 + S.lookahead), 1, "read-ahead");
+  if (!R.ready.has(id)) {
+    R.waitingFor = id;
+    $("#playstat").textContent = "generating this sentence…";
+    return;   // the poller calls playChunk again once it is ready
+  }
+  R.waitingFor = null;
+  $("#playstat").textContent = "";
+  audio.src = `/api/audio?book=${R.book.id}&preset=${presetId()}&id=${id}&v=${Date.now()}`;
+  try { await audio.play(); } catch (e) { $("#playstat").textContent = `can't play: ${e.message}`; }
+}
+
+audio.onended = () => {
+  if (!R.playing) return;
+  const i = R.order.indexOf(R.cur);
+  if (i + 1 < R.order.length) playChunk(R.order[i + 1]);
+  else if (R.ch < R.book.chapters.length - 1) { renderChapter(R.ch + 1, 0); startAt(R.order[0]); }
+  else stop();
+};
+
+// ---------------- status poller ----------------
+let lastRuns = [];
+const lastRtf = () => { const r = lastRuns.filter(x => x.preset === presetId()).slice(-10); return r.length ? +(r.reduce((a, x) => a + x.rtf, 0) / r.length).toFixed(2) : null; };
+
+async function poll() {
+  try {
+    const q = await api("/api/queue");
+    const pend = Object.values(q.pending).reduce((a, b) => a + b, 0);
+    const w = q.worker;
+    let s = w.state === "loading" ? `loading ${w.backend}…` : w.state === "error" ? `⚠ ${w.error}` : w.label ? w.label : "model idle";
+    if (q.current) s = `generating ${q.current.chars} chars (${q.current.elapsed}s) · ${s}`;
+    if (pend) s += ` · ${pend} waiting`;
+    for (const b of q.batches.filter(b => b.label !== "play" && b.label !== "read-ahead")) s += ` · ${b.label}: ${b.done + b.cached}/${b.n}`;
+    $("#qstat").textContent = s;
+    if (view === "reader" && R.book) {
+      await refreshReady();
+      if (R.playing && R.waitingFor && R.ready.has(R.waitingFor)) playChunk(R.waitingFor);
+      else if (R.playing && R.waitingFor && q.current) $("#playstat").textContent = `generating this sentence… ${q.current.elapsed}s`;
+    }
+  } catch (e) { $("#qstat").textContent = "server not reachable"; }
+  setTimeout(poll, 1500);
+}
+
+// ---------------- voices ----------------
+function renderVoices() {
+  $("#vlist").innerHTML = S.presets.map((p, i) => {
+    const opt = S.backends[p.backend] || {fields: []};
+    const task = p.voice.task;
+    const fields = opt.fields.filter(f => !f.when || f.when === task).map(f => {
+      const v = p.voice[f.key] ?? f.default;
+      const inp = f.type === "select" ? `<select data-k="${f.key}">${f.choices.map(c => `<option ${c === v ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>`
+        : f.type === "textarea" ? `<textarea data-k="${f.key}">${esc(v)}</textarea>`
+        : f.type === "bool" ? `<input type="checkbox" data-k="${f.key}" ${v ? "checked" : ""}>`
+        : `<input type="${f.type === "number" ? "number" : "text"}" step="any" data-k="${f.key}" data-num="${f.type === "number"}" value="${esc(v)}">`;
+      return `<label>${esc(f.label)}</label><div>${inp}</div>${f.hint ? `<div class="hint muted">${esc(f.hint)}</div>` : ""}`;
+    }).join("");
+    return `<div class="voice" data-i="${i}"><label>Name</label><div><input type="text" class="vname" value="${esc(p.name)}"></div>
+      <label>Model</label><div><select class="vback">${Object.entries(S.backends).map(([k, o]) => `<option value="${k}" ${k === p.backend ? "selected" : ""}>${esc(o.label)}</option>`).join("")}</select></div>
+      ${fields}<div class="row"><span class="muted">id ${p.id || "new"}</span><button class="vdel">Delete</button></div></div>`;
+  }).join("");
+  document.querySelectorAll(".voice").forEach(el => {
+    const p = S.presets[+el.dataset.i];
+    el.querySelector(".vname").oninput = e => p.name = e.target.value;
+    el.querySelector(".vback").onchange = e => { p.backend = e.target.value; p.voice = defaults(p.backend); renderVoices(); };
+    el.querySelectorAll("[data-k]").forEach(inp => inp.onchange = () => {
+      const k = inp.dataset.k;
+      p.voice[k] = inp.type === "checkbox" ? inp.checked : inp.dataset.num === "true" ? +inp.value : inp.value;
+      if (k === "task") renderVoices();
+    });
+    el.querySelector(".vdel").onclick = () => { S.presets.splice(+el.dataset.i, 1); renderVoices(); };
+  });
+}
+const defaults = b => Object.fromEntries(S.backends[b].fields.map(f => [f.key, f.default]));
+$("#addvoice").onclick = () => { const b = Object.keys(S.backends)[0]; S.presets.push({name: "New voice", backend: b, voice: defaults(b)}); renderVoices(); };
+$("#savevoices").onclick = async () => {
+  // keep only the fields that apply to the chosen task, so the voice id does not depend on hidden fields
+  for (const p of S.presets) {
+    const fs = S.backends[p.backend].fields.filter(f => !f.when || f.when === p.voice.task);
+    p.voice = Object.fromEntries(fs.map(f => [f.key, p.voice[f.key] ?? f.default]));
+  }
+  S.presets = (await api("/api/presets", {presets: S.presets})).presets;
+  fillPresets(); renderVoices();
+};
+
+function fillPresets() {
+  const opts = S.presets.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("");
+  $("#preset").innerHTML = opts; $("#benchpreset").innerHTML = opts;
+  const want = store.get("preset");
+  if (S.presets.some(p => p.id === want)) $("#preset").value = want;
+}
+
+// ---------------- speed ----------------
+async function loadBench() {
+  const {runs, batches} = await api("/api/runs");
+  lastRuns = runs;
+  const groups = {};
+  for (const r of runs) {
+    const k = `${r.label}|${r.task || "-"}`;
+    const g = groups[k] ??= {label: r.label, task: r.task, n: 0, chars: 0, audio: 0, gen: 0, parts: {}, first: r.ts, last: r.ts};
+    g.n++; g.chars += r.chars; g.audio += r.audio_s; g.gen += r.total_s; g.last = r.ts;
+    for (const [p, v] of Object.entries(r.parts_s || {})) g.parts[p] = (g.parts[p] || 0) + v;
+  }
+  $("#bylabel").innerHTML = table(["Model setup", "Task", "Chunks", "Chars", "Audio", "Generation", "RTF", "Chars / s", "Where the time goes", "Last"],
+    Object.values(groups).map(g => [esc(g.label), esc(g.task), n(g.n), n(g.chars), n(fmtS(g.audio)), n(fmtS(g.gen)), n(`<b>${(g.gen / g.audio).toFixed(2)}</b>`),
+      n((g.chars / g.gen).toFixed(1)), Object.entries(g.parts).sort((a, b) => b[1] - a[1]).map(([p, v]) => `${p} ${Math.round(100 * v / g.gen)}%`).join(" · ") || "–", day(g.last)]));
+  const bench = batches.filter(b => b.book === "_bench").reverse();
+  $("#benchruns").innerHTML = bench.length ? table(["When", "Voice", "Model setup", "Audio", "Wall time", "RTF", ""],
+    bench.map(b => [day(b.finished), esc(b.preset_name), esc(labelOf(runs, b)), n(fmtS(b.audio_s)), n(fmtS(b.wall_s)), n(`<b>${b.rtf}</b>`),
+      `<button data-play="_bench|${b.preset}|${b.first}">▶</button>`])) : `<p class="muted">Not run yet.</p>`;
+  const jobs = batches.filter(b => b.book !== "_bench" && !["play", "read-ahead"].includes(b.label)).reverse();
+  $("#batches").innerHTML = jobs.length ? table(["When", "Book", "What", "Voice", "Chunks", "Audio", "Wall time", "RTF", ""],
+    jobs.map(b => [day(b.finished), esc(b.title), esc(b.label), esc(b.preset_name), n(`${b.done}${b.cached ? ` (+${b.cached} cached)` : ""}`), n(fmtS(b.audio_s)),
+      n(fmtS(b.wall_s)), n(b.rtf ?? "–"), `<button data-play="${b.book}|${b.preset}|${b.first}">▶</button>`])) : `<p class="muted">Preprocess a page in the reader to see it here.</p>`;
+  document.querySelectorAll("[data-play]").forEach(btn => btn.onclick = () => {
+    const [book, preset, id] = btn.dataset.play.split("|");
+    audio.src = `/api/audio?book=${book}&preset=${preset}&id=${id}`; audio.play();
+  });
+}
+const n = v => ({n: v});
+const labelOf = (runs, b) => runs.find(r => (r.batches || []).includes(b.id))?.label || b.backend;
+const table = (head, rows) => `<table><tr>${head.map(h => `<th>${h}</th>`).join("")}</tr>${rows.map(r => `<tr>${r.map(c =>
+  c && c.n !== undefined ? `<td class="n">${c.n}</td>` : `<td>${c}</td>`).join("")}</tr>`).join("")}</table>`;
+$("#runbench").onclick = async () => {
+  await api("/api/bench", {preset: $("#benchpreset").value, fresh: $("#benchfresh").checked});
+  $("#runbench").textContent = "Queued — see the status at the top right";
+  setTimeout(() => $("#runbench").textContent = "Run benchmark passage", 4000);
+};
+
+// ---------------- storage ----------------
+async function loadStorage() {
+  const s = await api("/api/storage");
+  $("#stotal").textContent = `${fmtB(s.total)} of audio · ${fmtB(s.free)} free on disk · ${s.data_dir}`;
+  $("#srows").innerHTML = s.rows.length ? table(["Book", "Voice", "WAV", "M4A (compressed)", ""], s.rows.map(r => [
+    esc(r.title), `${esc(r.preset_name)} <span class="muted">${r.preset}</span>`,
+    n(r.wav_n ? `${r.wav_n} files · ${fmtB(r.wav_bytes)}` : "–"), n(r.m4a_n ? `${r.m4a_n} files · ${fmtB(r.m4a_bytes)}` : "–"),
+    `${r.wav_n ? `<button data-c="${r.book}|${r.preset}">Compress to AAC</button> ` : ""}<button data-d="${r.book}|${r.preset}">Delete</button>`])) : `<p class="muted">No audio yet.</p>`;
+  document.querySelectorAll("[data-c]").forEach(b => b.onclick = async () => {
+    const [book, preset] = b.dataset.c.split("|"); b.textContent = "Compressing…"; await api("/api/compress", {book, preset}); loadStorage();
+  });
+  document.querySelectorAll("[data-d]").forEach(b => b.onclick = async () => {
+    const [book, preset] = b.dataset.d.split("|");
+    if (confirm("Delete this audio? It can be generated again.")) { await api("/api/delete", {book, preset}); loadStorage(); }
+  });
+}
+
+// ---------------- start ----------------
+(async () => {
+  S = await api("/api/state");
+  fillPresets();
+  api("/api/runs").then(r => lastRuns = r.runs);
+  loadLibrary();
+  poll();
+})();

@@ -1,0 +1,22 @@
+{
+ "data_dir": "~/Documents/Audiobook",
+ "port": 8765,
+ "chunk_chars": 60,
+ "lookahead": 4,
+ "scan_dirs": [
+  "~/Library/Mobile Documents/iCloud~com~apple~iBooks/Documents",
+  "~/Library/Mobile Documents/com~apple~CloudDocs",
+  "~/Downloads",
+  "~/Documents",
+  "~/Desktop"
+ ],
+ "backends": {
+  "ming_torch": {
+   "python": "~/miniconda3/envs/mlx-speech/bin/python",
+   "opts": {"src": "~/mlx-speech/third_party/Ming-3.0-tts", "model": "~/mlx-speech/models/Ming-3.0-tts-0.5b",
+            "device": "mps", "dtype": "bf16"}
+  },
+  "say": {"python": "", "opts": {}}
+ },
+ "bench_text": "清晨的雨刚停，街角的面包店推开了木门。老板把第一盘刚出炉的面包摆上橱窗，热气在玻璃上画出一层薄雾。一个背着书包的小女孩停下脚步，踮起脚尖看了很久，最后从口袋里摸出两枚硬币，认真地数了三遍。"
+}

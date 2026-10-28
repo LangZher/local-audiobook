@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local Audiobook</title>
+<link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+<nav id="nav">
+  <button data-view="library" class="on">Library</button>
+  <button data-view="reader">Reader</button>
+  <button data-view="voices">Voices</button>
+  <button data-view="bench">Speed</button>
+  <button data-view="storage">Storage</button>
+  <span id="qstat"></span>
+</nav>
+
+<section id="library" class="view on">
+  <div class="bar">
+    <h2>Library</h2>
+    <button id="scan">Scan this Mac for EPUBs</button>
+    <span class="muted" id="libdir"></span>
+  </div>
+  <div id="scanlist" hidden></div>
+  <div id="books" class="grid"></div>
+</section>
+
+<section id="reader" class="view">
+  <header class="rbar">
+    <select id="chapter" title="Chapter"></select>
+    <span id="rtitle"></span>
+    <span class="grow"></span>
+    <select id="preset" title="Voice"></select>
+    <button id="play" title="Play this page (space)">▶ Play</button>
+    <select id="pre" title="Generate audio ahead of time">
+      <option value="">Preprocess…</option>
+      <option value="page">This page</option>
+      <option value="10">Next 10 pages</option>
+      <option value="chapter">This chapter</option>
+      <option value="book">Whole book</option>
+    </select>
+    <button id="map" title="Show which sentences already have audio">◌</button>
+  </header>
+  <div id="pagewrap"><div id="flow"></div></div>
+  <div id="turnL" class="turn"></div><div id="turnR" class="turn"></div>
+  <footer class="rfoot"><span id="pageno"></span><span id="pagestat"></span><span id="playstat"></span></footer>
+  <audio id="audio" preload="auto"></audio>
+</section>
+
+<section id="voices" class="view">
+  <div class="bar"><h2>Voices</h2><button id="addvoice">+ Voice</button><button id="savevoices">Save</button>
+    <span class="muted">Changing a voice's settings makes it a new voice: audio made with the old settings stays in Storage.</span></div>
+  <div id="vlist"></div>
+</section>
+
+<section id="bench" class="view">
+  <div class="bar"><h2>Speed &amp; quality</h2>
+    <select id="benchpreset"></select><button id="runbench">Run benchmark passage</button>
+    <label class="muted"><input type="checkbox" id="benchfresh" checked> re-generate</label></div>
+  <p class="muted">RTF = generation time ÷ audio length. Below 1 is faster than real time: playback never waits.</p>
+  <h3>By model setup</h3><div id="bylabel"></div>
+  <h3>Benchmark passage (same text every time)</h3><div id="benchruns"></div>
+  <h3>Jobs (a page, 10 pages, a chapter…)</h3><div id="batches"></div>
+</section>
+
+<section id="storage" class="view">
+  <div class="bar"><h2>Storage</h2><span class="muted" id="stotal"></span></div>
+  <div id="srows"></div>
+</section>
+
+<script src="/web/app.js"></script>
+</body>
+</html>
