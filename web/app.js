@@ -26,34 +26,78 @@ function show(v) {
 document.querySelectorAll("#nav button").forEach(b => b.onclick = () => show(b.dataset.view));
 
 // ---------------- library ----------------
+// Guided flow: ① find → ② import → ③ listen. The step strip shows where you are; every panel says what to do next.
+let scanned = false, fresh = new Set(store.get("fresh", []));
+
 async function loadLibrary() {
-  $("#libdir").textContent = `EPUBs are copied into ${S.data_dir}/books`;
+  $("#libdir").textContent = `Your library folder: ${S.data_dir.replace(/^\/Users\/[^/]+/, "~")}/books`;
   const books = await api("/api/library");
+  const anyAudio = books.some(b => Object.keys(b.audio).length);
+  const done = [scanned || books.length > 0, books.length > 0, anyAudio];
+  document.querySelectorAll("#steps li").forEach((li, i) => {
+    li.classList.toggle("done", done[i]);
+    li.classList.toggle("next", !done[i] && done.slice(0, i).every(Boolean));
+  });
+  $("#steps").hidden = done.every(Boolean);
   $("#books").innerHTML = books.length ? books.map(b => {
     const pct = b.progress ? Math.round(100 * (b.progress.ch + 1) / b.chapters) : 0;
+    const made = Math.max(0, ...Object.values(b.audio));
+    const au = made ? `<div class="au has">🔊 audio for ${Math.max(1, Math.round(100 * made / b.chunks))}% of the book</div>`
+                    : `<div class="au">no audio yet · about ${fmtS(b.chars / CHARS_PER_AUDIO_S)} to listen</div>`;
     return `<div class="book" data-id="${b.id}"><div class="cv" style="background-image:url('/api/cover?book=${b.id}')"></div>
-      <div class="t">${esc(b.title)}</div><div class="a">${esc(b.author)} · ${(b.chars / 1e4).toFixed(1)}万字</div>
+      <div class="t">${fresh.has(b.id) ? '<span class="badge">NEW</span>' : ""}${esc(b.title)}</div>
+      <div class="a">${esc(b.author)} · ${(b.chars / 1e4).toFixed(1)}万字</div>${au}
       <div class="pg"><i style="width:${pct}%"></i></div></div>`;
-  }).join("") : `<p class="muted">No books yet. Scan this Mac to gather your EPUBs here.</p>`;
-  document.querySelectorAll(".book").forEach(el => el.onclick = () => openBook(el.dataset.id));
+  }).join("") : `<p class="muted" style="grid-column:1/-1">No books yet. Press <b>Find EPUBs on this Mac</b> above.</p>`;
+  document.querySelectorAll(".book").forEach(el => el.onclick = () => {
+    fresh.delete(el.dataset.id); store.set("fresh", [...fresh]);
+    openBook(el.dataset.id);
+  });
+  return books;
 }
 
 $("#scan").onclick = async () => {
   const box = $("#scanlist");
   box.hidden = false;
-  box.innerHTML = `<p class="muted">Scanning (Spotlight + iCloud Books, Downloads, Documents, Desktop)…</p>`;
-  const found = await api("/api/scan", {});
-  box.innerHTML = `<table><tr><th></th><th>Title</th><th>Author</th><th class="n">Size</th><th>Where</th></tr>${found.map((f, i) => `
-    <tr><td><input type="checkbox" data-i="${i}" ${f.imported ? "disabled" : "checked"}></td><td>${esc(f.title)}${f.imported ? ' <span class="muted">(in library)</span>' : ""}</td>
-    <td>${esc(f.author)}</td><td class="n">${fmtB(f.size)}</td><td class="muted">${esc(f.path.replace(/^\/Users\/[^/]+/, "~"))}</td></tr>`).join("")}</table>
-    <div class="bar" style="margin-top:10px"><button id="doimport">Copy selected into the library</button>
-    <span class="muted">Originals stay where they are.</span></div>`;
+  $("#scan").disabled = true;
+  box.innerHTML = `<p class="muted">Looking for EPUBs in Apple Books, iCloud Drive, Downloads, Documents and Desktop… (a few seconds)</p>`;
+  let found;
+  try { found = await api("/api/scan", {}); } finally { $("#scan").disabled = false; }
+  scanned = true;
+  loadLibrary();
+  const {new: nw, have} = found;
+  const close = `<button id="scanclose">Close</button>`;
+  if (!nw.length) {
+    box.innerHTML = `<div class="scanhead"><b>Nothing new to import.</b><span class="muted">All ${have.length} books found are already in your library.</span><span class="grow"></span>${close}</div>`;
+    $("#scanclose").onclick = () => box.hidden = true;
+    return;
+  }
+  box.innerHTML = `<div class="scanhead"><b>Found ${nw.length} book${nw.length > 1 ? "s" : ""} not in your library</b>
+      ${have.length ? `<span class="muted">(${have.length} more already in it)</span>` : ""}<span class="grow"></span>
+      <button id="doimport" class="primary"></button>${close}</div>
+    <p class="muted" style="margin:0 0 8px">Untick what you don't want, then press Import. Each book is copied into your library folder; the original stays where it is.
+      Same book in two places? It is listed once (the Apple Books copy when there is one).</p>
+    <table><tr><th><input type="checkbox" id="selall" checked title="Select all"></th><th>Title</th><th>Author</th><th class="n">Size</th><th>Found in</th></tr>
+    ${nw.map((f, i) => `<tr><td><input type="checkbox" class="pick" data-i="${i}" checked></td><td>${esc(f.title)}</td><td>${esc(f.author)}</td>
+      <td class="n">${fmtB(f.size)}</td><td class="muted">${esc(f.where)}${f.others.length ? `<br>also in ${f.others.map(esc).join(", ")}` : ""}</td></tr>`).join("")}</table>`;
+  const picks = () => [...box.querySelectorAll(".pick:checked")];
+  const label = () => { const n = picks().length; $("#doimport").textContent = n ? `Import ${n} book${n > 1 ? "s" : ""}` : "Select books to import"; $("#doimport").disabled = !n; };
+  box.querySelectorAll(".pick").forEach(c => c.onchange = label);
+  $("#selall").onchange = e => { box.querySelectorAll(".pick").forEach(c => c.checked = e.target.checked); label(); };
+  $("#scanclose").onclick = () => box.hidden = true;
+  label();
   $("#doimport").onclick = async () => {
-    const paths = [...box.querySelectorAll("input:checked:not(:disabled)")].map(c => found[+c.dataset.i].path);
-    $("#doimport").textContent = "Copying…";
-    await api("/api/import", {paths});
-    box.hidden = true;
-    loadLibrary();
+    const paths = picks().map(c => nw[+c.dataset.i].path);
+    $("#doimport").disabled = true;
+    $("#doimport").textContent = `Importing ${paths.length}…`;
+    const {imported} = await api("/api/import", {paths});
+    imported.forEach(b => fresh.add(b.id)); store.set("fresh", [...fresh]);
+    await loadLibrary();
+    box.innerHTML = `<div class="scanhead"><b>✓ Imported ${imported.length} book${imported.length === 1 ? "" : "s"}</b>
+      <span class="muted">They are below, marked NEW. Next: open one and press ▶ to listen.</span><span class="grow"></span>
+      ${imported[0] ? `<button class="primary" id="opennew">Open ${esc(imported[0].title.slice(0, 18))}</button>` : ""}${close}</div>`;
+    $("#scanclose").onclick = () => box.hidden = true;
+    if (imported[0]) $("#opennew").onclick = () => { fresh.delete(imported[0].id); store.set("fresh", [...fresh]); openBook(imported[0].id); };
   };
 };
 
@@ -74,7 +118,23 @@ async function openBook(id, keepPage) {
     $("#chapter").innerHTML = R.book.chapters.map((c, i) => `<option value="${i}">${esc(c.title)}</option>`).join("");
   }
   show("reader");
+  showHint();
   renderChapter(R.ch, keepPage);
+}
+
+// How audio gets made, said once per book until dismissed, with today's measured speed
+function showHint() {
+  const h = $("#hint");
+  if (store.get("hint-ok", false)) { h.hidden = true; return; }
+  const rtf = lastRtf();
+  const speed = rtf == null ? "Local TTS is slower than real time today"
+    : rtf > 1 ? `This voice takes about ${rtf.toFixed(1)} s to make 1 s of speech`
+    : `This voice is faster than real time (${rtf.toFixed(2)} s per 1 s of speech), so ▶ alone never waits`;
+  h.innerHTML = `<span><b>▶ Play</b> reads from this page; each sentence's audio is made just before it plays (the first one takes ~10–20 s).
+    ${speed}${rtf == null || rtf > 1 ? `, so playback pauses between sentences. For smooth listening, choose <b>Make audio ahead… → Next 10 pages</b> and come back in a while.` : "."}
+    Audio is kept, so each sentence is made only once per voice.</span><button id="hintok">Got it</button>`;
+  h.hidden = false;
+  $("#hintok").onclick = () => { store.set("hint-ok", true); h.hidden = true; layout(); };
 }
 
 function renderChapter(ch, page = 0) {
@@ -180,9 +240,15 @@ $("#pre").onchange = async e => {
       const ids2 = R.book.chapters[i].paras.flatMap(p => p.chunks.map(k => k.id));
       await api("/api/enqueue", {book: R.book.id, preset: presetId(), ids: ids2, priority: 2, label: `${R.book.chapters[i].title} (book)`});
     }
+    $("#playstat").textContent = "Whole book queued; progress is at the top right.";
     return;
   }
+  const todo = ids.filter(i => !R.ready.has(i));
   await request(ids, 2, label);
+  if (!R.map) { R.map = true; store.set("map", true); paintReady(); }
+  const rtf = lastRtf(), chars = todo.reduce((n, i) => n + R.text[i].length, 0);
+  $("#playstat").textContent = !todo.length ? "This already has audio." :
+    `Making audio for ${todo.length} sentences${rtf ? ` (~${fmtS(chars / CHARS_PER_AUDIO_S * rtf)})` : ""}: a dotted line marks each one that is done; progress is at the top right.`;
 };
 
 // playback: start at the first sentence of the page (or the one double-clicked), keep `lookahead` chunks queued ahead

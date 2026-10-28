@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0 — 2026-10-28
+Importing and processing explain themselves (feedback: after a scan it was unclear how to get books in, or how
+they get audio).
+- Library: a 1 Find → 2 Import → 3 Listen strip that checks off steps and highlights the next one; hidden once
+  every step was done.
+- Scan results: one row per book (the Apple Books copy when the same book is in several places, the rest listed as
+  "also in"), books already in the library left out and counted, the Import button on top with the selected count,
+  select all, and a closing message with "Open <book>".
+- Book cards: NEW badge after import, and "no audio yet · about 17 h to listen" or "🔊 audio for 3% of the book".
+- Reader: a one-time hint on how audio is made, with the voice's measured speed; "Preprocess…" is now
+  "Make audio ahead…" and says how many sentences and roughly how long, and turns on the dotted done-marks.
+- `AUDIOBOOK_DATA` env var: use another library folder (tests).
+
 ## 0.1.1 — 2026-10-28
 - Fix: EPUBs whose OPF misspells `xmlns` (e.g. epubBuilder's `mlns=`) opened with 0 chapters; bare OPF tags are now read
   as OPF (无人生还 now has 19 chapters).

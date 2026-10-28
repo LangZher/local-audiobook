@@ -3,11 +3,11 @@
 A lightweight reader for your EPUBs that reads any page aloud with a **local** TTS model on Apple Silicon, and
 keeps a log of how fast the model is, so every speed-up of the model shows on real books.
 
-- **Library**: scans the Mac (Spotlight, iCloud Books, Downloads, Documents, Desktop) for EPUBs and copies them
-  into one folder, `~/Documents/Audiobook/books`.
+- **Library**: *Find EPUBs on this Mac* (Spotlight, Apple Books, iCloud Drive, Downloads, Documents, Desktop), tick
+  the ones you want, *Import*: copies go into one folder, `~/Documents/Audiobook/books`.
 - **Reader**: paginated two-column layout like Apple Books. ▶ reads the page, a faint highlight follows the
   sentence being read, pages turn on their own. Double-click a sentence to start there. ←/→ turn pages, space plays.
-- **Preprocess** a page, the next 10 pages, a chapter or the whole book in the background (local TTS is slow).
+- **Make audio ahead** for a page, the next 10 pages, a chapter or the whole book in the background (local TTS is slow).
 - **Voices**: pick the model and its settings, e.g. Ming-3.0-tts IP voices (灵小萌, 灵婉…) or a voice-design
   description; macOS `say` as an instant baseline.
 - **Speed**: RTF and time split per model setup, wall time per job, and a fixed benchmark passage to compare

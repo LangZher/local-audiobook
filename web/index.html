@@ -19,9 +19,14 @@
 <section id="library" class="view on">
   <div class="bar">
     <h2>Library</h2>
-    <button id="scan">Scan this Mac for EPUBs</button>
+    <button id="scan" class="primary">Find EPUBs on this Mac</button>
     <span class="muted" id="libdir"></span>
   </div>
+  <ol class="steps" id="steps">
+    <li data-s="1"><b>Find</b> the EPUBs on this Mac: Apple Books, iCloud Drive, Downloads, Documents, Desktop.</li>
+    <li data-s="2"><b>Import</b> the ones you want: a copy goes into one folder, the originals stay where they are.</li>
+    <li data-s="3"><b>Listen</b>: open a book and press ▶. Audio is made as it reads; <i>Make audio ahead…</i> prepares pages in the background.</li>
+  </ol>
   <div id="scanlist" hidden></div>
   <div id="books" class="grid"></div>
 </section>
@@ -33,8 +38,8 @@
     <span class="grow"></span>
     <select id="preset" title="Voice"></select>
     <button id="play" title="Play this page (space)">▶ Play</button>
-    <select id="pre" title="Generate audio ahead of time">
-      <option value="">Preprocess…</option>
+    <select id="pre" title="Generate audio in the background, so playback does not wait">
+      <option value="">Make audio ahead…</option>
       <option value="page">This page</option>
       <option value="10">Next 10 pages</option>
       <option value="chapter">This chapter</option>
@@ -42,6 +47,7 @@
     </select>
     <button id="map" title="Show which sentences already have audio">◌</button>
   </header>
+  <div id="hint" hidden></div>
   <div id="pagewrap"><div id="flow"></div></div>
   <div id="turnL" class="turn"></div><div id="turnR" class="turn"></div>
   <footer class="rfoot"><span id="pageno"></span><span id="pagestat"></span><span id="playstat"></span></footer>

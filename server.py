@@ -48,7 +48,7 @@ def load_config():
 
 
 CFG = load_config()
-DATA = Path(CFG["data_dir"]).expanduser()
+DATA = Path(os.environ.get("AUDIOBOOK_DATA") or CFG["data_dir"]).expanduser()   # env: a scratch library for tests
 for sub in ("books", "cache", "audio", "voices"):
     (DATA / sub).mkdir(parents=True, exist_ok=True)
 LOCK = threading.RLock()
@@ -152,9 +152,15 @@ def library():
     for bid, f in FILES.items():
         b = get_book(bid)
         chars = sum(len(t) for t in b["index"].values())
+        audio = {}   # voice id -> chunks with audio (counted from files, so it is cheap and always true)
+        for d in (DATA / "audio" / bid).glob("*"):
+            n = sum(1 for x in d.iterdir() if x.suffix in (".wav", ".m4a"))
+            if n:
+                audio[d.name] = n
         out.append({"id": bid, "title": b["title"], "author": b["author"], "chapters": len(b["chapters"]),
-                    "chars": chars, "file": f.name, "progress": prog.get(bid)})
-    out.sort(key=lambda x: -(x["progress"] or {}).get("ts", 0))
+                    "chars": chars, "chunks": len(b["index"]), "audio": audio, "file": f.name,
+                    "progress": prog.get(bid), "added": f.stat().st_mtime})
+    out.sort(key=lambda x: -max((x["progress"] or {}).get("ts", 0), x["added"]))
     return out
 
 
@@ -181,8 +187,9 @@ def scan():
                 seen.add(str(p))
     lib_dir = str(DATA / "books")
     have = set(FILES)
+    have_titles = {get_book(b)["title"] for b in FILES}
     out, ids = [], set()
-    for s in sorted(seen):
+    for s in sorted(seen, key=lambda s: ("iBooks" not in s, s)):   # Apple Books copies win ties
         p = Path(s)
         if s.startswith(lib_dir) or "/.Trash/" in s or not p.exists() or any(q.suffix == ".epub" for q in p.parents):
             continue
@@ -194,8 +201,27 @@ def scan():
             continue
         ids.add(info["id"])
         size = p.stat().st_size if p.is_file() else sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
-        out.append({**info, "path": s, "size": size, "imported": info["id"] in have})
-    return out
+        out.append({**info, "path": s, "size": size, "imported": info["id"] in have or info["title"] in have_titles,
+                    "where": where(s)})
+    # one entry per title: the Apple Books copy if there is one (that is the one I read), else the largest
+    groups = {}
+    for f in out:
+        groups.setdefault(f["title"], []).append(f)
+    new, have_list = [], []
+    for title, fs in groups.items():
+        fs.sort(key=lambda f: ("iBooks" not in f["path"], -f["size"]))
+        best = {**fs[0], "others": [f["where"] for f in fs[1:]]}
+        (have_list if any(f["imported"] for f in fs) else new).append(best)
+    return {"new": new, "have": have_list}
+
+
+def where(path):
+    home = str(Path.home())
+    if "iCloud~com~apple~iBooks" in path:
+        return "Apple Books"
+    if "com~apple~CloudDocs" in path:
+        return "iCloud Drive"
+    return "~" + str(Path(path).parent)[len(home):] if path.startswith(home) else str(Path(path).parent)
 
 
 def safe_name(s):
@@ -223,7 +249,7 @@ def import_books(paths):
                         z.write(f, str(f.relative_to(src)), compress_type=zipfile.ZIP_DEFLATED)
         else:
             shutil.copy2(src, dest)
-        done.append(info["title"])
+        done.append({"id": info["id"], "title": info["title"]})
     refresh_files()
     return done
 
