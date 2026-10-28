@@ -26,6 +26,9 @@ class Epub:
         self.opf = root.find(".//c:rootfile", NS).get("full-path")
         self.base = posixpath.dirname(self.opf)
         self.pkg = ET.fromstring(self.read(self.opf))
+        for el in self.pkg.iter():   # some builders misspell xmlns (e.g. `mlns=`): treat bare tags as OPF
+            if isinstance(el.tag, str) and not el.tag.startswith("{"):
+                el.tag = f"{{{NS['opf']}}}{el.tag}"
 
     def names(self):
         if self.zip:

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1 — 2026-10-28
+- Fix: EPUBs whose OPF misspells `xmlns` (e.g. epubBuilder's `mlns=`) opened with 0 chapters; bare OPF tags are now read
+  as OPF (无人生还 now has 19 chapters).
+
 ## 0.1.0 — 2026-10-28
 First version.
 - Library: scan the Mac for EPUBs (Spotlight + iCloud Books, Downloads, Documents, Desktop) and copy them into
