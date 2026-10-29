@@ -76,7 +76,10 @@ short enough that the first sound after Play comes quickly, long enough that the
 breaks stay small. Ming then splits a chunk into ~24-char fragments itself unless `raw_text` is on.
 
 Audio is stored by **hash of the chunk text** under a **hash of the voice settings**, so re-chunking a book or
-editing a voice never plays the wrong audio: it simply finds nothing and generates again.
+editing a voice never plays the wrong audio: it simply finds nothing and generates again. Fields left at their
+default do not count in the voice hash, so saving the voice list (which fills every field in) or adding another
+voice keeps each voice's id and its audio; on start and on save, audio under an older id of a voice is moved into
+its current folder.
 
 ## Queue and preload
 

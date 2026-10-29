@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 — 2026-10-28
+- Fix: adding a voice and pressing Save turned every existing voice into "(old voice settings)" and its audio
+  stopped playing (a whole book of 灵小萌 had to be made again). Save fills in each voice's default fields, and the
+  voice id hashed them, so 灵小萌 went from `1eedf8c2f3` to `9137f67e61`. The id now ignores fields at their
+  default, and on start and on save audio under any older id of the same voice is moved into its current folder
+  (duplicates dropped), so the existing audio is found again.
+
 ## 0.2.0 — 2026-10-28
 Importing and processing explain themselves (feedback: after a scan it was unclear how to get books in, or how
 they get audio).

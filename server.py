@@ -89,13 +89,57 @@ DEFAULT_PRESETS = [
 ]
 
 
+def _hash(backend, voice):
+    return hashlib.sha1(json.dumps([backend, voice], sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:10]
+
+
+def _defaults(backend):
+    try:
+        return {f["key"]: f.get("default") for f in backends.options(backend)["fields"]}
+    except (ImportError, KeyError):
+        return {}
+
+
 def preset_id(p):
-    return hashlib.sha1(json.dumps([p["backend"], p["voice"]], sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:10]
+    # fields left at their default do not count, so the editor filling them in keeps the id (and its audio)
+    d = _defaults(p["backend"])
+    return _hash(p["backend"], {k: v for k, v in p["voice"].items() if k not in d or v != d[k]})
+
+
+def legacy_ids(p):
+    """Ids this voice had before v0.2.2: the hash of the voice with any subset of its default-valued fields."""
+    d = _defaults(p["backend"])
+    keep = {k: v for k, v in p["voice"].items() if k not in d or v != d[k]}
+    # the browser saves 2.0 as 2, so try the JSON round-trip form of each default
+    opt = {k: int(d[k]) if isinstance(d[k], float) and d[k].is_integer() else d[k] for k in d if k not in keep}
+    out = set()
+    for r in range(len(opt) + 1):
+        for ks in itertools.combinations(sorted(opt), r):
+            out.add(_hash(p["backend"], {**keep, **{k: opt[k] for k in ks}}))
+    return out - {preset_id(p)}
 
 
 def presets():
     ps = jload(DATA / "presets.json", None) or DEFAULT_PRESETS
     return [{**p, "id": preset_id(p)} for p in ps]
+
+
+def merge_legacy_audio():
+    """Move audio stored under an older id of a current voice into that voice's folder (same voice, same text)."""
+    moved = 0
+    for p in presets():
+        for old in legacy_ids(p):
+            for src in (DATA / "audio").glob(f"*/{old}"):
+                dest = src.parent / p["id"]
+                dest.mkdir(exist_ok=True)
+                for f in src.iterdir():
+                    if (dest / f.name).exists():
+                        f.unlink()
+                    else:
+                        f.replace(dest / f.name)
+                        moved += 1
+                src.rmdir()
+    return moved
 
 
 def preset(pid):
@@ -624,6 +668,7 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/presets":
             ps = [{"name": p["name"], "backend": p["backend"], "voice": p["voice"]} for p in d["presets"]]
             jsave(DATA / "presets.json", ps)
+            merge_legacy_audio()
             return {"presets": presets()}
         if path == "/api/progress":
             with LOCK:
@@ -660,6 +705,7 @@ def main():
     ap.add_argument("--parent-pid", type=int)
     a = ap.parse_args()
     refresh_files()
+    merge_legacy_audio()
     Q = Queue()
     srv = None
     for port in range(a.port, a.port + 20):
