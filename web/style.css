@@ -1,6 +1,6 @@
 :root {
   --bg: #000; --panel: #111214; --line: #26282c; --fg: #f2f2f2; --muted: #8b8f96; --accent: #e8c46a;
-  --now: rgba(255, 214, 102, .14); --ready: rgba(120, 200, 160, .35);
+  --now: rgba(255, 214, 102, .3); --nowline: rgba(255, 214, 102, .6); --ready: rgba(120, 200, 160, .35);
   --read: "PingFang SC", "Songti SC", -apple-system, sans-serif;
 }
 * { box-sizing: border-box; }
@@ -14,7 +14,7 @@ button.on { border-color: var(--accent); color: var(--accent); }
 nav { display: flex; gap: 6px; align-items: center; padding: 8px 14px; border-bottom: 1px solid var(--line); height: 46px; }
 nav button { border: none; background: none; color: var(--muted); }
 nav button.on { color: var(--fg); }
-#qstat { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#qstat { margin-left: auto; min-width: 0; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .view { display: none; height: calc(100% - 46px); overflow: auto; padding: 16px 22px; }
 .view.on { display: block; }
 .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
@@ -37,10 +37,14 @@ th { color: var(--muted); font-weight: 500; } td.n, th.n { text-align: right; fo
 .rbar .grow { flex: 1; } #rtitle { color: var(--muted); font-size: 13px; }
 #chapter { max-width: 220px; } #preset { max-width: 220px; }
 #pagewrap { flex: 1; overflow: hidden; margin: 18px 6vw 8px; position: relative; }
-#flow { height: 100%; font: 26px/1.75 var(--read); letter-spacing: .02em; text-align: justify; }
+#flow { height: 100%; font: 26px/1.75 var(--read); letter-spacing: .02em; text-align: justify;
+  transition: transform .5s cubic-bezier(.3, .1, .2, 1); }
 #flow p { margin: 0; text-indent: 2em; } #flow p.h { text-indent: 0; font-weight: 600; text-align: center; margin: .6em 0; }
 .ck { border-radius: 3px; transition: background .3s; cursor: text; }
-.ck.now { background: var(--now); }
+.ck.now, #flow.map .ck.now { background: var(--now); text-decoration: underline solid var(--nowline);
+  text-decoration-thickness: 2px; text-underline-offset: 7px; -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+.hl { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+.hl input { width: 80px; padding: 0; accent-color: var(--accent); }
 #flow.map .ck.ok { text-decoration: underline dotted var(--ready); text-underline-offset: 6px; }
 #flow.map .ck.wait { text-decoration: underline dotted rgba(232, 196, 106, .5); text-underline-offset: 6px; }
 .turn { position: absolute; top: 60px; bottom: 40px; width: 6vw; cursor: pointer; } #turnL { left: 0; } #turnR { right: 0; }
@@ -72,3 +76,24 @@ button.primary:disabled { opacity: .5; cursor: default; }
 #hint { margin: 0 14px; padding: 8px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
   color: var(--muted); font-size: 13px; line-height: 1.5; display: flex; gap: 12px; align-items: center; }
 #hint[hidden] { display: none; } #hint b { color: var(--fg); } #hint button { margin-left: auto; flex: none; }
+
+/* background jobs: what is being made, time left, pause */
+#jobs { position: relative; display: flex; gap: 6px; align-items: center; flex: none; }
+#jobs[hidden] { display: none; }
+#jobsbtn { display: flex; gap: 8px; align-items: center; border-color: var(--accent); }
+#jobsbtn .bar { display: block; width: 90px; height: 5px; background: var(--line); border-radius: 3px; overflow: hidden; }
+#jobsbtn .bar b { display: block; height: 100%; background: var(--accent); }
+#jobs.paused #jobsbtn { border-color: var(--line); color: var(--muted); }
+#jobs.paused #jobsbtn .bar b { background: var(--muted); }
+#pause { min-width: 92px; }
+#jobpanel { position: absolute; right: 0; top: 38px; z-index: 10; width: 460px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 10px 12px; box-shadow: 0 8px 30px #000a; }
+#jobpanel .job { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+#jobpanel .job:last-child { border-bottom: none; }
+#jobpanel .job .bar { grid-column: 1; height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+#jobpanel .job .bar b { display: block; height: 100%; background: var(--accent); }
+#jobpanel .job button { grid-row: 1 / span 3; grid-column: 2; align-self: center; }
+
+/* voice samples */
+.voice .samples { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; }
+.voice .samples button.making { color: var(--muted); }

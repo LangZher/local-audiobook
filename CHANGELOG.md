@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.0 — 2026-10-30
+- Fix: audio getting worse toward the end of a sentence. In books that put every printed line in its own paragraph
+  (无人生还), chunks were cut mid-word ("…倚角而" | "坐，…") and Ming garbled the dangling end (Whisper heard "倚角而"
+  as "一腳兒"). Such chapters are now joined back into real paragraphs before chunking; other books are unchanged.
+  The book is parsed again, so its audio is made again. The "Raw text" option now says to leave it off: sending a
+  whole chunk in one piece also makes its ending a little worse.
+- Reader: highlight-strength slider (stronger by default, with an underline); a sentence that crosses a page turns
+  the page when the voice gets there instead of when it ends; page turns slide.
+- Making audio ahead: a bar at the top with what is being made, progress and time left (from the voice's measured
+  speed), a panel per job with Cancel and an "all done around 23:40", and Pause / Resume (playback still works while
+  paused). The wait for a sentence shows "12 s of ~20 s".
+- Voices: each voice says a short sample in Chinese and in English (▶ 中文 / ▶ English); a new voice makes both on
+  Save and plays the Chinese one.
+
 ## 0.2.1 — 2026-10-28
 - Fix: adding a voice and pressing Save turned every existing voice into "(old voice settings)" and its audio
   stopped playing (a whole book of 灵小萌 had to be made again). Save fills in each voice's default fields, and the

@@ -21,7 +21,7 @@ function show(v) {
   view = v;
   document.querySelectorAll("#nav button").forEach(b => b.classList.toggle("on", b.dataset.view === v));
   document.querySelectorAll(".view").forEach(s => s.classList.toggle("on", s.id === v));
-  ({library: loadLibrary, voices: renderVoices, bench: loadBench, storage: loadStorage, reader: () => R.book && layout()}[v])();
+  ({library: loadLibrary, voices: () => { renderVoices(); refreshSamples(); }, bench: loadBench, storage: loadStorage, reader: () => R.book && layout()}[v])();
 }
 document.querySelectorAll("#nav button").forEach(b => b.onclick = () => show(b.dataset.view));
 
@@ -157,20 +157,30 @@ function layout(page) {
   flow.style.columnWidth = `${(W - gap * (cols - 1)) / cols}px`;
   flow.style.columnGap = `${gap}px`;
   flow.style.columnFill = "auto";
+  flow.style.transition = "none";   // relayout jumps; only page turns slide
   flow.style.transform = "none";
   const wl = wrap.getBoundingClientRect().left;
-  R.pageOf = {};
+  const pg = r => Math.max(0, Math.floor((r.left - wl + 2) / (W + gap)));
+  R.pageOf = {}; R.split = {};
   for (const el of flow.querySelectorAll(".ck")) {
-    const r = el.getClientRects()[0];
-    if (r) R.pageOf[el.dataset.id] = Math.max(0, Math.floor((r.left - wl + 2) / (W + gap)));
+    const rs = [...el.getClientRects()].filter(r => r.width);
+    if (!rs.length) continue;
+    const id = el.dataset.id, p0 = pg(rs[0]), p1 = pg(rs[rs.length - 1]);
+    R.pageOf[id] = p0;
+    if (p1 > p0) {   // the sentence runs onto the next page: the share of its text on this page says when to turn
+      const w = rs.reduce((a, r) => a + r.width, 0), w0 = rs.filter(r => pg(r) === p0).reduce((a, r) => a + r.width, 0);
+      R.split[id] = {page: p1, at: w0 / w};
+    }
   }
   R.pages = Math.max(1, ...Object.values(R.pageOf).map(p => p + 1));
   if (page === undefined) page = R.cur != null && R.pageOf[R.cur] != null ? R.pageOf[R.cur] : R.page;
   if (R.resumeChunk && R.pageOf[R.resumeChunk] != null) { page = R.pageOf[R.resumeChunk]; R.resumeChunk = null; }
-  goPage(Math.min(page, R.pages - 1), true);
+  goPage(Math.min(page, R.pages - 1));
+  flow.offsetWidth;   // apply the jump before turning the slide back on
+  flow.style.transition = "";
 }
 
-function goPage(p, quiet) {
+function goPage(p) {
   if (p < 0) { if (R.ch > 0) renderChapter(R.ch - 1, "end"); return; }
   if (p >= R.pages) { if (R.ch < R.book.chapters.length - 1) renderChapter(R.ch + 1, 0); return; }
   R.page = p;
@@ -193,6 +203,15 @@ document.addEventListener("keydown", e => {
 });
 $("#flow").ondblclick = e => { const id = e.target.closest(".ck")?.dataset.id; if (id) { window.getSelection().removeAllRanges(); startAt(id); } };
 $("#map").onclick = () => { R.map = !R.map; store.set("map", R.map); paintReady(); };
+// highlight strength 0–100: background and underline of the sentence being read
+function setHl(v) {
+  const st = document.documentElement.style, a = v / 100;
+  st.setProperty("--now", `rgba(255, 214, 102, ${(0.03 + 0.47 * a).toFixed(3)})`);
+  st.setProperty("--nowline", `rgba(255, 214, 102, ${Math.min(1, 1.2 * a).toFixed(3)})`);
+}
+$("#hl").value = store.get("hl", 55);
+setHl(+$("#hl").value);
+$("#hl").oninput = e => { setHl(+e.target.value); store.set("hl", +e.target.value); };
 $("#preset").onchange = () => { store.set("preset", presetId()); stop(); R.asked.clear(); refreshReady(); };
 
 async function refreshReady() {
@@ -252,7 +271,8 @@ $("#pre").onchange = async e => {
 };
 
 // playback: start at the first sentence of the page (or the one double-clicked), keep `lookahead` chunks queued ahead
-function togglePlay() { R.playing ? stop() : startAt(R.cur && R.pageOf[R.cur] === R.page ? R.cur : idsOnPages(R.page, R.page)[0]); }
+const onPage = id => R.pageOf[id] === R.page || R.split[id]?.page === R.page;
+function togglePlay() { R.playing ? stop() : startAt(R.cur && onPage(R.cur) ? R.cur : idsOnPages(R.page, R.page)[0]); }
 $("#play").onclick = togglePlay;
 
 async function startAt(id) {
@@ -275,7 +295,7 @@ function stop() {
 async function playChunk(id) {
   if (!R.playing) return;
   R.cur = id;
-  if (R.pageOf[id] !== R.page) goPage(R.pageOf[id]);
+  if (!onPage(id)) goPage(R.pageOf[id]);
   paintReady();
   const i = R.order.indexOf(id);
   request(R.order.slice(i + 1, i + 1 + S.lookahead), 1, "read-ahead");
@@ -286,9 +306,16 @@ async function playChunk(id) {
   }
   R.waitingFor = null;
   $("#playstat").textContent = "";
+  if (R.split[id] && R.page > R.pageOf[id]) goPage(R.pageOf[id]);   // (re)starting it: begin where it begins
   audio.src = `/api/audio?book=${R.book.id}&preset=${presetId()}&id=${id}&v=${Date.now()}`;
   try { await audio.play(); } catch (e) { $("#playstat").textContent = `can't play: ${e.message}`; }
 }
+
+// a sentence that runs onto the next page turns it when the voice gets there, not when the sentence ends
+audio.ontimeupdate = () => {
+  const s = R.playing && R.split[R.cur];
+  if (s && audio.duration && R.page < s.page && audio.currentTime / audio.duration >= s.at) goPage(s.page);
+};
 
 audio.onended = () => {
   if (!R.playing) return;
@@ -304,22 +331,62 @@ const lastRtf = () => { const r = lastRuns.filter(x => x.preset === presetId()).
 
 async function poll() {
   try {
-    const q = await api("/api/queue");
+    const q = lastQ = await api("/api/queue");
     const pend = Object.values(q.pending).reduce((a, b) => a + b, 0);
     const w = q.worker;
     let s = w.state === "loading" ? `loading ${w.backend}…` : w.state === "error" ? `⚠ ${w.error}` : w.label ? w.label : "model idle";
-    if (q.current) s = `generating ${q.current.chars} chars (${q.current.elapsed}s) · ${s}`;
+    if (q.current) s = `generating ${q.current.chars} chars (${q.current.elapsed}s of ~${q.current.est_s}s) · ${s}`;
     if (pend) s += ` · ${pend} waiting`;
-    for (const b of q.batches.filter(b => b.label !== "play" && b.label !== "read-ahead")) s += ` · ${b.label}: ${b.done + b.cached}/${b.n}`;
+    for (const b of q.batches.filter(b => !BG(b) && !["play", "read-ahead"].includes(b.label))) s += ` · ${b.label}: ${b.done + b.cached}/${b.n}`;
     $("#qstat").textContent = s;
+    renderJobs();
     if (view === "reader" && R.book) {
       await refreshReady();
       if (R.playing && R.waitingFor && R.ready.has(R.waitingFor)) playChunk(R.waitingFor);
-      else if (R.playing && R.waitingFor && q.current) $("#playstat").textContent = `generating this sentence… ${q.current.elapsed}s`;
+      else if (R.playing && R.waitingFor && q.current) $("#playstat").textContent = q.current.id === R.waitingFor
+        ? `generating this sentence… ${Math.round(q.current.elapsed)} s of ~${Math.round(q.current.est_s)} s` : "generating… (waiting for the sentence before it)";
     }
+    if (view === "voices" && making.size) await refreshSamples();
   } catch (e) { $("#qstat").textContent = "server not reachable"; }
   setTimeout(poll, 1500);
 }
+
+// ---------------- background jobs ("Make audio ahead…"): progress, time left, pause, cancel ----------------
+let lastQ = null, jobsOpen = false;
+const BG = b => b.priority >= 2;   // what Pause holds; play, read-ahead and samples always go
+const clock = s => new Date(Date.now() + s * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+
+function renderJobs() {
+  const q = lastQ, bs = q ? q.batches.filter(BG) : [];
+  $("#jobs").hidden = !bs.length;
+  if (!bs.length) { jobsOpen = false; return; }
+  const n = bs.reduce((a, b) => a + b.n, 0), done = bs.reduce((a, b) => a + b.done + b.cached + b.failed, 0);
+  const left = bs.reduce((a, b) => a + b.left_s, 0);
+  const finishing = q.paused && q.current?.priority >= 2;
+  $("#jobs").classList.toggle("paused", q.paused);
+  $("#jobstxt").textContent = `${q.paused ? (finishing ? "Pausing after this sentence" : "Paused") : "Making audio"} · ${bs.length > 1 ? `${bs.length} jobs` : bs[0].label} · ${done}/${n} · `
+    + (q.paused ? `${fmtS(left)} of work left` : `~${fmtS(left)} left`);
+  $("#jobsbar").style.width = `${(100 * done / n).toFixed(1)}%`;
+  $("#pause").textContent = q.paused ? "▶ Resume" : "❚❚ Pause";
+  $("#jobpanel").hidden = !jobsOpen;
+  if (!jobsOpen) return;
+  $("#jobpanel").innerHTML = `<p class="muted" style="margin:0 0 4px">${q.paused ? "Paused: nothing is made in the background until you resume. ▶ Play still makes the sentences it reads."
+      : `All done around <b>${clock(left)}</b>, at this voice's measured speed. Pause any time; jobs keep their place.`}</p>`
+    + bs.map(b => `<div class="job"><div><b>${esc(b.title)}</b> · ${esc(b.label)}</div>
+      <div class="muted">${b.done + b.cached}/${b.n} sentences · ${esc(b.preset_name)} · ~${fmtS(b.left_s)} left</div>
+      <i class="bar"><b style="width:${(100 * (b.done + b.cached + b.failed) / b.n).toFixed(1)}%"></b></i>
+      <button data-cancel="${b.id}">Cancel</button></div>`).join("");
+  document.querySelectorAll("[data-cancel]").forEach(btn => btn.onclick = async () => {
+    await api("/api/cancel-batch", {id: btn.dataset.cancel});
+    lastQ.batches = lastQ.batches.filter(b => b.id !== btn.dataset.cancel); renderJobs();
+  });
+}
+$("#jobsbtn").onclick = () => { jobsOpen = !jobsOpen; renderJobs(); };
+$("#pause").onclick = async () => {
+  await api("/api/pause", {paused: !lastQ.paused});
+  lastQ.paused = !lastQ.paused; renderJobs();
+};
+document.addEventListener("click", e => { if (jobsOpen && !e.target.closest("#jobs")) { jobsOpen = false; renderJobs(); } });
 
 // ---------------- voices ----------------
 function renderVoices() {
@@ -336,31 +403,83 @@ function renderVoices() {
     }).join("");
     return `<div class="voice" data-i="${i}"><label>Name</label><div><input type="text" class="vname" value="${esc(p.name)}"></div>
       <label>Model</label><div><select class="vback">${Object.entries(S.backends).map(([k, o]) => `<option value="${k}" ${k === p.backend ? "selected" : ""}>${esc(o.label)}</option>`).join("")}</select></div>
-      ${fields}<div class="row"><span class="muted">id ${p.id || "new"}</span><button class="vdel">Delete</button></div></div>`;
+      ${fields}<div class="samples"><span class="muted">Hear it</span>${p.id && !S.dirty
+        ? Object.entries(LANGS).map(([l, name]) => `<button class="vs" data-lang="${l}">▶ ${name}</button>`).join("")
+        : `<button class="vs" data-lang="zh">Save and hear it</button>`}</div>
+      <div class="row"><span class="muted">id ${p.id || "new"}</span><button class="vdel">Delete</button></div></div>`;
   }).join("");
   document.querySelectorAll(".voice").forEach(el => {
     const p = S.presets[+el.dataset.i];
     el.querySelector(".vname").oninput = e => p.name = e.target.value;
-    el.querySelector(".vback").onchange = e => { p.backend = e.target.value; p.voice = defaults(p.backend); renderVoices(); };
+    el.querySelector(".vback").onchange = e => { p.backend = e.target.value; p.voice = defaults(p.backend); dirty(); };
     el.querySelectorAll("[data-k]").forEach(inp => inp.onchange = () => {
       const k = inp.dataset.k;
       p.voice[k] = inp.type === "checkbox" ? inp.checked : inp.dataset.num === "true" ? +inp.value : inp.value;
-      if (k === "task") renderVoices();
+      dirty();
     });
-    el.querySelector(".vdel").onclick = () => { S.presets.splice(+el.dataset.i, 1); renderVoices(); };
+    el.querySelector(".vdel").onclick = () => { S.presets.splice(+el.dataset.i, 1); dirty(); };
+    el.querySelectorAll(".vs").forEach(b => b.onclick = async () => {
+      if (S.dirty || !p.id) await saveVoices();
+      sample(S.presets[+el.dataset.i].id, b.dataset.lang);
+    });
+  });
+  paintSamples();
+}
+const dirty = () => { S.dirty = true; renderVoices(); };
+
+// voice samples: a short line in Chinese and in English, made once per voice and kept
+const LANGS = {zh: "中文", en: "English"};
+let samples = {}, making = new Set(), wantPlay = null;
+async function refreshSamples() {
+  samples = await api("/api/samples");
+  for (const k of [...making]) { const [pid, l] = k.split("|"); if (samples[pid]?.[l] || !samples[pid]) making.delete(k); }
+  if (wantPlay && samples[wantPlay.pid]?.[wantPlay.lang]) { playSample(wantPlay.pid, wantPlay.lang); wantPlay = null; }
+  paintSamples();
+}
+function paintSamples() {
+  document.querySelectorAll(".voice").forEach(el => {
+    const pid = S.presets[+el.dataset.i]?.id;
+    el.querySelectorAll(".vs[data-lang]").forEach(b => {
+      if (!pid || S.dirty || !LANGS[b.dataset.lang] || b.textContent.startsWith("Save")) return;
+      const k = `${pid}|${b.dataset.lang}`, cur = lastQ?.current;
+      b.classList.toggle("making", making.has(k));
+      b.textContent = making.has(k) ? `making ${LANGS[b.dataset.lang]}…${cur?.book === "_samples" && cur.preset === pid ? ` ${Math.round(cur.elapsed)} s of ~${Math.round(cur.est_s)} s` : ""}`
+        : `▶ ${LANGS[b.dataset.lang]}`;
+    });
   });
 }
+async function sample(pid, lang, langs = [lang]) {
+  if (samples[pid]?.[lang]) return playSample(pid, lang);
+  await api("/api/sample", {preset: pid, langs});
+  langs.forEach(l => making.add(`${pid}|${l}`));
+  wantPlay = {pid, lang};
+  paintSamples();
+}
+function playSample(pid, lang) {
+  stop();
+  audio.src = `/api/audio?book=_samples&preset=${pid}&id=${{zh: "0-0", en: "0-1"}[lang]}&v=${Date.now()}`;
+  audio.play();
+}
 const defaults = b => Object.fromEntries(S.backends[b].fields.map(f => [f.key, f.default]));
-$("#addvoice").onclick = () => { const b = Object.keys(S.backends)[0]; S.presets.push({name: "New voice", backend: b, voice: defaults(b)}); renderVoices(); };
-$("#savevoices").onclick = async () => {
+$("#addvoice").onclick = () => { const b = Object.keys(S.backends)[0]; S.presets.push({name: "New voice", backend: b, voice: defaults(b)}); dirty(); };
+async function saveVoices() {
   // keep only the fields that apply to the chosen task, so the voice id does not depend on hidden fields
   for (const p of S.presets) {
     const fs = S.backends[p.backend].fields.filter(f => !f.when || f.when === p.voice.task);
     p.voice = Object.fromEntries(fs.map(f => [f.key, p.voice[f.key] ?? f.default]));
   }
+  const before = new Set(S.presets.map(p => p.id));
   S.presets = (await api("/api/presets", {presets: S.presets})).presets;
+  S.dirty = false;
   fillPresets(); renderVoices();
-};
+  samples = await api("/api/samples");
+  // a new voice (or new settings) says something right away: both samples are made, the Chinese one plays
+  const fresh = S.presets.filter(p => !before.has(p.id) && !samples[p.id]?.zh);
+  for (const p of fresh) await sample(p.id, "zh", Object.keys(LANGS));
+  if (fresh.length > 1) wantPlay = {pid: fresh[0].id, lang: "zh"};
+  paintSamples();
+}
+$("#savevoices").onclick = saveVoices;
 
 function fillPresets() {
   const opts = S.presets.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("");

@@ -64,6 +64,12 @@ like chunk 1. IP voices are stable by name, so `IP` is the default.
 
 ## Chunks: the unit of audio
 
+Before chunking, `epub.unwrap` joins paragraphs that are really one paragraph hard-wrapped into lines: some EPUBs
+(无人生还) put every printed line in its own `<p>`, cutting sentences mid-word ("…倚角而" | "坐，…"). Every chunk then
+ended on half a word, and Ming garbled exactly that end, which sounded like the audio getting worse toward the end
+of each sentence. It applies only to chapters where many long, punctuated lines end without a sentence end, so normal
+books and contents pages stay as they are; `epub.PARSER` makes cached books parse again when this changes.
+
 `epub.split_chunks(text, max_chars=60)`:
 
 1. Never cross a paragraph (a paragraph break is a natural pause, and the text layout stays intact).
@@ -89,11 +95,17 @@ One model process, one chunk at a time, by priority:
 |---|---|---|
 | 0 play | Play / double-click a sentence | the sentence to play now + `lookahead` (4) after it; replaces older play jobs of the book |
 | 1 read-ahead | the player, at each new sentence | the next `lookahead` sentences |
+| 0 sample | the Voices page | a short line in Chinese and in English per voice (made on save for a new voice) |
 | 2 preprocess | the Preprocess menu | this page, next 10 pages, this chapter, the whole book |
 
+**Pause** (the bar at the top while anything is made ahead) holds priority 2 only: the chunk in progress finishes,
+then nothing is made in the background, while ▶ Play and read-ahead still make what they read. Each job shows its
+time left: its chunks still to make × the voice's measured generation seconds per character (recent runs).
+
 Playback goes sentence by sentence: if the audio is there it plays; if not, the player waits (shows "generating…")
-and resumes when the poller sees it. Pages turn on their own as the highlighted sentence moves on, and the next
-chapter follows the last one. With RTF > 1 (today's PyTorch baseline: about 2 for IP voices, 6 for voice design) playback waits between
+and resumes when the poller sees it. Pages turn on their own as the highlighted sentence moves on (sliding); a sentence
+that runs onto the next page turns it when the voice gets there (the share of its text on the first page, against the
+audio's progress), not when the sentence ends. The next chapter follows the last one. With RTF > 1 (today's PyTorch baseline: about 2 for IP voices, 6 for voice design) playback waits between
 sentences, so for listening without pauses preprocess first; when the model reaches RTF < 1, read-ahead alone is
 enough. That moment is the goal the Speed page tracks.
 

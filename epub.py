@@ -165,6 +165,40 @@ def has_words(t):
     return re.search(r"[\w一-鿿]", t) is not None
 
 
+END = re.compile(rf"[。！？!?；;…：:.．—~～][{CLOSE}]*$|[{CLOSE}]$")
+WRAP_MIN = 12   # shorter lines that end without punctuation are section marks ("一", "第一章"), not wrapped lines
+
+
+def wrapped(t):
+    """A line of prose cut before its sentence ends: long, punctuated inside (titles and contents entries are not),
+    and no sentence end at the end."""
+    return len(t) >= WRAP_MIN and re.search(r"[，。,；]", t) is not None and not END.search(t)
+
+
+def unwrap(paras):
+    """Join paragraphs that are really one paragraph hard-wrapped into lines (some EPUBs put every printed line in
+    its own <p>, cutting sentences mid-word: "…倚角而" | "坐，一边…"): a line that is long and does not end a
+    sentence continues on the next one. Otherwise each chunk would end on half a word, and so would its audio.
+    Only for chapters that look wrapped (many long lines without an ending), so normal books stay as they are."""
+    long = [t for h, t in paras if not h and len(t) >= WRAP_MIN]
+    cut = sum(map(wrapped, long))
+    if cut < 10 or cut < 0.3 * len(long):
+        return paras
+    out = []
+    for h, t in paras:
+        prev = out[-1] if out else None
+        if prev and not h and not prev[0] and prev[2]:
+            sep = " " if re.search(r"[A-Za-z0-9,]$", prev[1]) and re.match(r"[A-Za-z0-9]", t) else ""
+            prev[1] += sep + t
+        else:
+            out.append([h, t, False])
+        out[-1][2] = not out[-1][0] and wrapped(out[-1][1])
+    return [(h, t) for h, t, _ in out]
+
+
+PARSER = 2   # bump when parsing changes, so cached books are parsed again
+
+
 def parse(path, max_chars=60):
     """The book as JSON-able data: {id, title, author, chapters: [{title, paras: [{h, chunks: [{id, t}]}]}]}."""
     e = Epub(path)
@@ -176,7 +210,7 @@ def parse(path, max_chars=60):
             p.flush()
         except KeyError:
             continue
-        paras = [(h, t) for h, t in p.out if has_words(t)]
+        paras = unwrap([(h, t) for h, t in p.out if has_words(t)])
         if not paras:
             continue
         ci = len(chapters)
@@ -190,7 +224,7 @@ def parse(path, max_chars=60):
             out.append({"h": h, "chunks": cs})
         chapters.append({"title": title[:80], "paras": out})
     return {"id": e.book_id(), "title": e.meta("title") or e.path.stem, "author": e.meta("creator"),
-            "max_chars": max_chars, "chapters": chapters}
+            "max_chars": max_chars, "parser": PARSER, "chapters": chapters}
 
 
 def quick_info(path):

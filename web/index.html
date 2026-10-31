@@ -14,6 +14,11 @@
   <button data-view="bench">Speed</button>
   <button data-view="storage">Storage</button>
   <span id="qstat"></span>
+  <div id="jobs" hidden>
+    <button id="jobsbtn" title="Audio being made in the background"><span id="jobstxt"></span><i class="bar"><b id="jobsbar"></b></i></button>
+    <button id="pause" title="Pause or resume making audio ahead (playback still makes its own sentences)"></button>
+    <div id="jobpanel" hidden></div>
+  </div>
 </nav>
 
 <section id="library" class="view on">
@@ -46,6 +51,7 @@
       <option value="book">Whole book</option>
     </select>
     <button id="map" title="Show which sentences already have audio">◌</button>
+    <label class="hl" title="Highlight strength of the sentence being read">Highlight <input type="range" id="hl" min="0" max="100"></label>
   </header>
   <div id="hint" hidden></div>
   <div id="pagewrap"><div id="flow"></div></div>
@@ -56,7 +62,8 @@
 
 <section id="voices" class="view">
   <div class="bar"><h2>Voices</h2><button id="addvoice">+ Voice</button><button id="savevoices">Save</button>
-    <span class="muted">Changing a voice's settings makes it a new voice: audio made with the old settings stays in Storage. Adding or renaming a voice keeps the others' audio.</span></div>
+    <span class="muted">Changing a voice's settings makes it a new voice: audio made with the old settings stays in Storage. Adding or renaming a voice keeps the others' audio.
+    Each voice says a short sample in Chinese and in English once it is saved (the Ming voices speak both).</span></div>
   <div id="vlist"></div>
 </section>
 

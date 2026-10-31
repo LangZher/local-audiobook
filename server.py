@@ -174,13 +174,28 @@ def bench_book():
             "chapters": [{"title": "bench", "paras": [{"h": False, "chunks": chunks}]}]}
 
 
+# a short sample per language, so a voice can be heard before reading with it (Ming's voices speak both)
+SAMPLES = {"zh": "你好，这是我的声音。今天我们一起读一本好书，一页一页，慢慢地读。",
+           "en": "Hello, this is how I sound. Let's read a good book together, one page at a time."}
+
+
+def samples_book():
+    chunks = [{"id": f"0-{i}", "t": t} for i, t in enumerate(SAMPLES.values())]
+    return {"id": "_samples", "title": "Voice samples", "author": "", "max_chars": CFG["chunk_chars"],
+            "chapters": [{"title": "samples", "paras": [{"h": False, "chunks": chunks}]}]}
+
+
+SAMPLE_IDS = {lang: f"0-{i}" for i, lang in enumerate(SAMPLES)}
+SPECIAL = {"_bench": bench_book, "_samples": samples_book}
+
+
 def get_book(bid):
     with LOCK:
         if bid in BOOKS:
             return BOOKS[bid]
         cache = DATA / "cache" / f"{bid}.json"
-        b = bench_book() if bid == "_bench" else jload(cache, None)
-        if not b or b.get("max_chars") != CFG["chunk_chars"]:
+        b = SPECIAL[bid]() if bid in SPECIAL else jload(cache, None)
+        if not b or b.get("max_chars") != CFG["chunk_chars"] or (bid not in SPECIAL and b.get("parser") != epub.PARSER):
             if bid not in FILES:
                 refresh_files()
             b = epub.parse(FILES[bid], CFG["chunk_chars"])
@@ -370,6 +385,9 @@ class Queue:
         self.heap, self.best, self.jobs, self.seq = [], {}, {}, itertools.count()
         self.batches, self.current, self.paused = {}, None, False
         self.worker = Worker()
+        self.rate = {}   # preset -> [generation s, chars] of its recent chunks, for time estimates
+        for r in read_jsonl(DATA / "runs.jsonl")[-500:]:
+            self.learn(r)
         threading.Thread(target=self.loop, daemon=True).start()
 
     def add(self, bid, pid, ids, priority, label):
@@ -378,7 +396,7 @@ class Queue:
             raise ValueError("unknown preset")
         with self.cv:
             batch = {"id": f"b{int(time.time() * 1000)}", "label": label, "book": bid, "title": book["title"],
-                     "preset": pid, "preset_name": p["name"], "backend": p["backend"], "n": 0, "cached": 0,
+                     "preset": pid, "preset_name": p["name"], "backend": p["backend"], "priority": priority, "n": 0, "cached": 0,
                      "done": 0, "failed": 0, "chars": 0, "audio_s": 0.0, "gen_s": 0.0, "created": time.time(),
                      "started": None, "finished": None, "first": None}
             for cid in ids:
@@ -400,6 +418,29 @@ class Queue:
                 self.batches[batch["id"]] = batch
             self.cv.notify()
             return batch
+
+    def learn(self, run):
+        g, c = self.rate.get(run["preset"], (0.0, 0))
+        if c > 1500:   # keep it recent: a faster model shows within a few pages
+            g, c = g / 2, c / 2
+        self.rate[run["preset"]] = (g + run["total_s"], c + run["chars"])
+
+    def s_per_char(self, pid):
+        g, c = self.rate.get(pid, (0, 0))
+        if c:
+            return g / c
+        tot = [sum(x) for x in zip(*self.rate.values())] if self.rate else [0, 0]
+        return tot[0] / tot[1] if tot[1] else 0.75   # Ming 0.5B on MPS when nothing is measured yet
+
+    def cancel_batch(self, bid):
+        """Drop one job (e.g. a chapter being made ahead); chunks other jobs still want stay queued."""
+        with self.cv:
+            for key in [k for k, j in self.jobs.items() if bid in j["batches"]]:
+                self.jobs[key]["batches"].discard(bid)
+                if not self.jobs[key]["batches"]:
+                    self.jobs.pop(key)
+                    self.best.pop(key, None)
+            self.batches.pop(bid, None)
 
     def cancel(self, max_priority=2, book=None):
         with self.cv:
@@ -423,7 +464,8 @@ class Queue:
     def next_job(self):
         with self.cv:
             while True:
-                while self.heap and not self.paused:
+                # paused holds the background work (priority 2); play and read-ahead still go
+                while self.heap and not (self.paused and self.heap[0][0] >= 2):
                     pr, _, key = heapq.heappop(self.heap)
                     if self.best.get(key) == pr and key in self.jobs:
                         self.best.pop(key)
@@ -446,7 +488,8 @@ class Queue:
                     for b in bs:
                         b["started"] = b["started"] or time.time()
                     self.current = {"book": bid, "preset": pid, "id": cid, "chars": len(job["text"]),
-                                    "started": time.time(), "priority": pr}
+                                    "started": time.time(), "priority": pr, "batches": sorted(job["batches"]),
+                                    "est_s": round(len(job["text"]) * self.s_per_char(pid), 1)}
                     self.worker.ensure(p["backend"])
                     self.current["started"] = time.time()
                     r = self.worker.synth(job["text"], p["voice"], out.with_suffix(".tmp.wav"))
@@ -460,6 +503,8 @@ class Queue:
                            "parts_s": r.get("parts_s"), "anchor_s": r.get("anchor_s", 0), "priority": pr,
                            "batches": sorted(job["batches"])}
                     append_jsonl(DATA / "runs.jsonl", run)
+                    with self.cv:
+                        self.learn(run)
                 ok = True
             except Exception as e:
                 print(f"job {key} failed: {e}", file=sys.stderr)
@@ -481,17 +526,28 @@ class Queue:
                 time.sleep(1)
 
     def snapshot(self):
+        """Queue state, with time left per job: its chunks still to make × the voice's measured seconds per char."""
         with self.cv:
-            pend = {}
-            for (bid, pid, _), pr in self.best.items():
+            pend, left = {}, {}
+            for key, pr in self.best.items():
                 pend[pr] = pend.get(pr, 0) + 1
+                job = self.jobs.get(key)
+                for b in job["batches"] if job else ():
+                    left[b] = left.get(b, 0) + len(job["text"]) * self.s_per_char(key[1])
+            cur = None
+            if self.current:
+                el = time.time() - self.current["started"]
+                cur = dict(self.current, elapsed=round(el, 1))
+                for b in self.current["batches"]:
+                    left[b] = left.get(b, 0) + max(0, self.current["est_s"] - el)
+            batches = [dict(b, left_s=round(left.get(b["id"], 0))) for b in self.batches.values()]
             w = self.worker
             return {"worker": {"state": w.state, "backend": w.name, "label": w.label, "error": w.error,
                                "load_s": w.load_s},
-                    "current": dict(self.current, elapsed=round(time.time() - self.current["started"], 1))
-                    if self.current else None,
-                    "pending": pend, "paused": self.paused,
-                    "batches": sorted(self.batches.values(), key=lambda b: b["created"])}
+                    "current": cur, "pending": pend, "paused": self.paused,
+                    "left_s": round(sum(len(j["text"]) * self.s_per_char(k[1]) for k, j in self.jobs.items())
+                                    + (max(0, cur["est_s"] - cur["elapsed"]) if cur else 0)),
+                    "batches": sorted(batches, key=lambda b: b["created"])}
 
 
 # ---------- storage ----------
@@ -504,7 +560,7 @@ def storage():
             m4a = [f.stat().st_size for f in pd.glob("*.m4a")]
             if not wav and not m4a:
                 continue
-            title = "Benchmark passage" if bd.name == "_bench" else (BOOKS.get(bd.name) or {}).get("title")
+            title = get_book(bd.name)["title"] if bd.name in SPECIAL else (BOOKS.get(bd.name) or {}).get("title")
             if title is None and bd.name in FILES:
                 title = get_book(bd.name)["title"]
             rows.append({"book": bd.name, "title": title or bd.name, "preset": pd.name,
@@ -626,6 +682,9 @@ class H(BaseHTTPRequestHandler):
             return self.send_json(Q.snapshot())
         if path == "/api/storage":
             return self.send_json(storage())
+        if path == "/api/samples":   # which voices have their samples made
+            return self.send_json({p["id"]: {lang: bool(find_audio("_samples", p["id"], t)) for lang, t in SAMPLES.items()}
+                                   for p in presets()})
         if path == "/api/runs":
             return self.send_json({"runs": read_jsonl(DATA / "runs.jsonl")[-2000:],
                                    "batches": read_jsonl(DATA / "batches.jsonl")})
@@ -654,6 +713,12 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/cancel":
             Q.cancel(int(d.get("max_priority", 2)), d.get("book"))
             return None
+        if path == "/api/cancel-batch":
+            Q.cancel_batch(d["id"])
+            return None
+        if path == "/api/sample":
+            ids = [SAMPLE_IDS[lang] for lang in d.get("langs") or SAMPLES]
+            return Q.add("_samples", d["preset"], ids, 0, "voice sample")
         if path == "/api/pause":
             with Q.cv:
                 Q.paused = bool(d.get("paused"))
