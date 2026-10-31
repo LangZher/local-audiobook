@@ -149,8 +149,8 @@ def soft_split(c, max_chars):
     if len(c) <= max_chars:
         return [c]
     lo, hi = max(4, len(c) // 4), min(len(c) - 4, len(c) * 3 // 4)
-    cuts = [i for i in range(lo, hi + 1) if c[i - 1] in AFTER or c[i - 1] in SHUT or c[i] in BEFORE or c[i] in OPEN
-            if not (c[i - 1].isascii() and c[i].isascii() and c[i - 1].isalnum() and c[i].isalnum())]
+    cuts = [i for i in range(lo, hi + 1) if c[i - 1] == " " or ((c[i - 1] in AFTER or c[i - 1] in SHUT
+            or c[i] in BEFORE or c[i] in OPEN) and not (c[i - 1].isascii() and c[i].isascii()))]
     if cuts:
         i = min(cuts, key=lambda i: abs(i - len(c) / 2))
         return soft_split(c[:i], max_chars) + soft_split(c[i:], max_chars)
@@ -217,7 +217,7 @@ def unwrap(paras):
     return [(h, t) for h, t, _ in out]
 
 
-PARSER = 3   # bump when parsing changes, so cached books are parsed again
+PARSER = 4   # bump when parsing changes, so cached books are parsed again
 
 
 def parse(path, max_chars=30):
