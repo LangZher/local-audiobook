@@ -99,7 +99,9 @@ class Backend:
         path = self.cache / f"anchor-{key}.wav"
         if not path.exists():
             self.cache.mkdir(parents=True, exist_ok=True)
-            self._run(ANCHOR_TEXT, path, voice, task=task, use_zero_spk_emb=True, **kw)
+            tmp = path.with_suffix(f".{os.getpid()}.wav")   # two workers may make the same anchor at once
+            self._run(ANCHOR_TEXT, tmp, voice, task=task, use_zero_spk_emb=True, **kw)
+            tmp.replace(path)
         return path
 
     def synthesize(self, text, voice, out_path):

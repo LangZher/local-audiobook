@@ -379,16 +379,42 @@ class Worker:
 
 
 # ---------- queue: priority 0 = play now, 1 = read-ahead, 2 = preprocess ----------
+# Ming 0.5B runs batch 1 and is bound by per-step overhead, not by the GPU, so several model processes side by side
+# make more audio per minute (M4 24GB, 2026-10-30: 3 workers 2.1× one) though each chunk takes longer. SLOW is that
+# per-chunk slowdown, used to estimate times for a worker count not measured yet.
+SLOW = {1: 1.0, 2: 1.15, 3: 1.35, 4: 1.75, 5: 2.6, 6: 4.9}
+IDLE_S = 90   # extra workers quit after this long without work, giving their memory back
+
+
 class Queue:
     def __init__(self):
         self.cv = threading.Condition(LOCK)
         self.heap, self.best, self.jobs, self.seq = [], {}, {}, itertools.count()
-        self.batches, self.current, self.paused = {}, None, False
-        self.worker = Worker()
-        self.rate = {}   # preset -> [generation s, chars] of its recent chunks, for time estimates
-        for r in read_jsonl(DATA / "runs.jsonl")[-500:]:
+        self.batches, self.running, self.paused = {}, {}, False
+        self.n = max(1, int(jload(DATA / "settings.json", {}).get("workers", 1)))
+        self.pool = []   # one Worker per slot; slot i works while i < self.n
+        self.rate = {}   # (preset, workers) -> [generation s, chars] of recent chunks, for time estimates
+        for r in read_jsonl(DATA / "runs.jsonl")[-1500:]:
             self.learn(r)
-        threading.Thread(target=self.loop, daemon=True).start()
+        self.grow()
+
+    @property
+    def worker(self):
+        return self.pool[0]
+
+    def grow(self):
+        while len(self.pool) < self.n:
+            self.pool.append(Worker())
+            threading.Thread(target=self.loop, args=(len(self.pool) - 1,), daemon=True).start()
+
+    def set_workers(self, n):
+        with self.cv:
+            self.n = max(1, min(8, int(n)))
+            s = jload(DATA / "settings.json", {})
+            s["workers"] = self.n
+            jsave(DATA / "settings.json", s)
+            self.grow()
+            self.cv.notify_all()
 
     def add(self, bid, pid, ids, priority, label):
         book, p = get_book(bid), preset(pid)
@@ -416,21 +442,32 @@ class Queue:
                     heapq.heappush(self.heap, (priority, next(self.seq), key))
             if batch["n"] > batch["cached"]:
                 self.batches[batch["id"]] = batch
-            self.cv.notify()
+            self.cv.notify_all()
             return batch
 
     def learn(self, run):
-        g, c = self.rate.get(run["preset"], (0.0, 0))
+        k = (run["preset"], run.get("workers", 1))
+        g, c = self.rate.get(k, (0.0, 0))
         if c > 1500:   # keep it recent: a faster model shows within a few pages
             g, c = g / 2, c / 2
-        self.rate[run["preset"]] = (g + run["total_s"], c + run["chars"])
+        self.rate[k] = (g + run["total_s"], c + run["chars"])
 
-    def s_per_char(self, pid):
-        g, c = self.rate.get(pid, (0, 0))
-        if c:
+    def s_per_char(self, pid, n=None):
+        """Seconds one worker takes per character of this voice, with n workers running (measured, else scaled)."""
+        n = n or self.n
+        g, c = self.rate.get((pid, n), (0, 0))
+        if c > 100:
             return g / c
-        tot = [sum(x) for x in zip(*self.rate.values())] if self.rate else [0, 0]
-        return tot[0] / tot[1] if tot[1] else 0.75   # Ming 0.5B on MPS when nothing is measured yet
+        seen = [(m, gc) for (q, m), gc in self.rate.items() if q == pid and gc[1]] or \
+               [(m, gc) for (q, m), gc in self.rate.items() if gc[1]]
+        if not seen:
+            return 0.75 * SLOW.get(n, n)   # Ming 0.5B on MPS when nothing is measured yet
+        m, (g, c) = max(seen, key=lambda x: x[1][1])
+        return g / c * SLOW.get(n, n) / SLOW.get(m, m)
+
+    def left_s(self, chars_by_pid):
+        """Wall time to make that much text with all workers on it."""
+        return sum(ch * self.s_per_char(pid) for pid, ch in chars_by_pid.items()) / self.n
 
     def cancel_batch(self, bid):
         """Drop one job (e.g. a chapter being made ahead); chunks other jobs still want stay queued."""
@@ -461,20 +498,24 @@ class Queue:
                 append_jsonl(DATA / "batches.jsonl", rec)
             self.batches.pop(b["id"], None)
 
-    def next_job(self):
+    def next_job(self, slot):
         with self.cv:
+            idle = time.time()
             while True:
                 # paused holds the background work (priority 2); play and read-ahead still go
-                while self.heap and not (self.paused and self.heap[0][0] >= 2):
+                while slot < self.n and self.heap and not (self.paused and self.heap[0][0] >= 2):
                     pr, _, key = heapq.heappop(self.heap)
                     if self.best.get(key) == pr and key in self.jobs:
                         self.best.pop(key)
                         return key, pr, self.jobs.pop(key)
-                self.cv.wait()
+                if (slot >= self.n or time.time() - idle > IDLE_S) and slot and self.pool[slot].proc:
+                    self.pool[slot].stop()   # not needed now: free its memory (slot 0 stays loaded)
+                self.cv.wait(timeout=IDLE_S / 3)
 
-    def loop(self):
+    def loop(self, slot):
+        worker = self.pool[slot]
         while True:
-            key, pr, job = self.next_job()
+            key, pr, job = self.next_job(slot)
             bid, pid, cid = key
             p = preset(pid)
             bs = [self.batches[b] for b in job["batches"] if b in self.batches]
@@ -487,17 +528,20 @@ class Queue:
                 if not find_audio(bid, pid, job["text"]):
                     for b in bs:
                         b["started"] = b["started"] or time.time()
-                    self.current = {"book": bid, "preset": pid, "id": cid, "chars": len(job["text"]),
-                                    "started": time.time(), "priority": pr, "batches": sorted(job["batches"]),
-                                    "est_s": round(len(job["text"]) * self.s_per_char(pid), 1)}
-                    self.worker.ensure(p["backend"])
-                    self.current["started"] = time.time()
-                    r = self.worker.synth(job["text"], p["voice"], out.with_suffix(".tmp.wav"))
+                    cur = self.running[slot] = {
+                        "book": bid, "preset": pid, "id": cid, "chars": len(job["text"]), "started": time.time(),
+                        "priority": pr, "batches": sorted(job["batches"]), "slot": slot,
+                        "est_s": round(len(job["text"]) * self.s_per_char(pid), 1)}
+                    worker.ensure(p["backend"])
+                    cur["started"] = time.time()
+                    tmp = out.with_suffix(f".tmp{slot}.wav")
+                    r = worker.synth(job["text"], p["voice"], tmp)
                     if not r.get("ok"):
                         raise RuntimeError(r.get("error"))
-                    out.with_suffix(".tmp.wav").replace(out)
+                    tmp.replace(out)
                     run = {"ts": time.time(), "book": bid, "preset": pid, "preset_name": p["name"], "chunk": cid,
-                           "chars": len(job["text"]), "backend": p["backend"], "label": self.worker.label,
+                           "chars": len(job["text"]), "backend": p["backend"], "label": worker.label,
+                           "workers": sum(1 for w in self.pool if w.proc),
                            "task": p["voice"].get("task"), "total_s": r["total_s"], "audio_s": r["audio_s"],
                            "rtf": round(r["total_s"] / r["audio_s"], 3) if r["audio_s"] else None,
                            "parts_s": r.get("parts_s"), "anchor_s": r.get("anchor_s", 0), "priority": pr,
@@ -508,9 +552,9 @@ class Queue:
                 ok = True
             except Exception as e:
                 print(f"job {key} failed: {e}", file=sys.stderr)
-                self.worker.error = str(e)
+                worker.error = str(e)
             finally:
-                self.current = None
+                self.running.pop(slot, None)
             with self.cv:
                 for b in bs:
                     if ok:
@@ -534,20 +578,78 @@ class Queue:
                 job = self.jobs.get(key)
                 for b in job["batches"] if job else ():
                     left[b] = left.get(b, 0) + len(job["text"]) * self.s_per_char(key[1])
-            cur = None
-            if self.current:
-                el = time.time() - self.current["started"]
-                cur = dict(self.current, elapsed=round(el, 1))
-                for b in self.current["batches"]:
-                    left[b] = left.get(b, 0) + max(0, self.current["est_s"] - el)
-            batches = [dict(b, left_s=round(left.get(b["id"], 0))) for b in self.batches.values()]
-            w = self.worker
+            running = []
+            for c in sorted(self.running.values(), key=lambda c: (c["priority"], c["started"])):
+                el = time.time() - c["started"]
+                running.append(dict(c, elapsed=round(el, 1)))
+                for b in c["batches"]:
+                    left[b] = left.get(b, 0) + max(0, c["est_s"] - el)
+            # a job's chunks are shared out over all workers
+            batches = [dict(b, left_s=round(left.get(b["id"], 0) / self.n)) for b in self.batches.values()]
+            w = next((w for w in self.pool if w.state in ("loading", "error")), self.worker)
+            chars = {}
+            for (_, pid, _), j in self.jobs.items():
+                chars[pid] = chars.get(pid, 0) + len(j["text"])
             return {"worker": {"state": w.state, "backend": w.name, "label": w.label, "error": w.error,
                                "load_s": w.load_s},
-                    "current": cur, "pending": pend, "paused": self.paused,
-                    "left_s": round(sum(len(j["text"]) * self.s_per_char(k[1]) for k, j in self.jobs.items())
-                                    + (max(0, cur["est_s"] - cur["elapsed"]) if cur else 0)),
+                    "workers": self.n, "loaded": sum(1 for x in self.pool if x.proc),
+                    "current": running[0] if running else None, "running": running,
+                    "pending": pend, "paused": self.paused,
+                    "left_s": round(self.left_s(chars) + sum(max(0, c["est_s"] - c["elapsed"]) for c in running) / self.n),
                     "batches": sorted(batches, key=lambda b: b["created"])}
+
+
+# ---------- system: memory, GPU, how many workers fit ----------
+RAM = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True).stdout or 0)
+WORKER_GB = 4.8   # one Ming 0.5B process on MPS, peak footprint while generating (M4, 2026-10-30)
+
+
+def footprint(pid):
+    """Physical footprint of a process in bytes (what Activity Monitor calls Memory; includes GPU buffers)."""
+    try:
+        o = subprocess.run(["footprint", "-p", str(pid)], capture_output=True, text=True, timeout=5).stdout
+        m = re.search(r"Footprint:\s*([\d.]+)\s*([KMG])B", o)
+        return float(m.group(1)) * {"K": 1e3, "M": 1e6, "G": 1e9}[m.group(2)] if m else 0
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+
+
+def system(pid=None):
+    vm = subprocess.run(["vm_stat"], capture_output=True, text=True).stdout
+    page = int(re.search(r"page size of (\d+)", vm).group(1))
+    pages = {k.strip().lower(): int(v.strip(" .")) for k, v in re.findall(r"^Pages ([^:]+):\s+(\d+)\.", vm, re.M)}
+    avail = page * sum(pages.get(k, 0) for k in ("free", "inactive", "speculative", "purgeable"))
+    gpu = {}
+    io = subprocess.run(["ioreg", "-r", "-d", "1", "-c", "IOAccelerator"], capture_output=True, text=True).stdout
+    for k, name in (("util", "Device Utilization %"), ("alloc", "Alloc system memory"), ("in_use", "In use system memory")):
+        m = re.search(rf'"{re.escape(name)}"=(\d+)', io)
+        if m:
+            gpu[k] = int(m.group(1))
+    gpu["budget"] = int(RAM * 0.74)   # Metal's recommended working set (torch.mps.recommended_max_memory: 19.1 of 25.8 GB, M4)
+    workers = []
+    for i, w in enumerate(Q.pool):
+        alive = w.proc and w.proc.poll() is None
+        workers.append({"slot": i, "state": w.state if alive else "stopped", "backend": w.name,
+                        "pid": w.proc.pid if alive else None, "bytes": footprint(w.proc.pid) if alive else 0,
+                        "busy": i in Q.running})
+    ours = sum(w["bytes"] for w in workers)
+    per = max([w["bytes"] for w in workers if w["busy"]] + [WORKER_GB * 1e9])
+    # what fits: memory free now plus what our workers already hold, keeping 3 GB for the rest of the Mac
+    fit_mem = int((avail + ours - 3e9) // per)
+    fit_gpu = int(gpu["budget"] // per)
+    by_n = {}   # measured: per worker count, generation time per audio second of one chunk
+    for r in read_jsonl(DATA / "runs.jsonl")[-3000:]:
+        if r.get("backend") != "ming_torch" or not r.get("audio_s"):
+            continue
+        g = by_n.setdefault(r.get("workers", 1), {"chunks": 0, "gen_s": 0.0, "audio_s": 0.0})
+        g["chunks"] += 1
+        g["gen_s"] += r["total_s"]
+        g["audio_s"] += r["audio_s"]
+    return {"ram": RAM, "available": avail, "gpu": gpu, "workers": workers, "ours": ours, "per_worker": per,
+            "n": Q.n, "max": max(1, min(fit_mem, fit_gpu, 8)), "fit_mem": fit_mem, "fit_gpu": fit_gpu,
+            "recommended": max(1, min(fit_mem, fit_gpu, 3)), "by_n": by_n,
+            # wall seconds per character of this voice with n workers: the reader's "a chapter takes…"
+            "s_per_char": {n: Q.s_per_char(pid, n) / n for n in range(1, 7)} if pid else None}
 
 
 # ---------- storage ----------
@@ -682,6 +784,8 @@ class H(BaseHTTPRequestHandler):
             return self.send_json(Q.snapshot())
         if path == "/api/storage":
             return self.send_json(storage())
+        if path == "/api/system":
+            return self.send_json(system(q.get("preset")))
         if path == "/api/samples":   # which voices have their samples made
             return self.send_json({p["id"]: {lang: bool(find_audio("_samples", p["id"], t)) for lang, t in SAMPLES.items()}
                                    for p in presets()})
@@ -722,7 +826,7 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/pause":
             with Q.cv:
                 Q.paused = bool(d.get("paused"))
-                Q.cv.notify()
+                Q.cv.notify_all()
             return None
         if path == "/api/bench":
             b = bench_book()
@@ -747,8 +851,12 @@ class H(BaseHTTPRequestHandler):
             delete_audio(d["book"], d["preset"])
             return None
         if path == "/api/stop-worker":
-            Q.worker.stop()
+            for w in Q.pool:
+                w.stop()
             return None
+        if path == "/api/workers":
+            Q.set_workers(d["n"])
+            return system()
         raise ValueError("not found")
 
 
@@ -757,7 +865,8 @@ def watch_parent(pid):
         try:
             os.kill(pid, 0)
         except OSError:
-            Q.worker.stop()
+            for w in Q.pool:
+                w.stop()
             os._exit(0)
         time.sleep(2)
 
@@ -788,7 +897,8 @@ def main():
     try:
         srv.serve_forever()
     finally:
-        Q.worker.stop()
+        for w in Q.pool:
+            w.stop()
 
 
 if __name__ == "__main__":

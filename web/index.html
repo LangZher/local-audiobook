@@ -13,6 +13,7 @@
   <button data-view="voices">Voices</button>
   <button data-view="bench">Speed</button>
   <button data-view="storage">Storage</button>
+  <button data-view="gpu">GPU</button>
   <span id="qstat"></span>
   <div id="jobs" hidden>
     <button id="jobsbtn" title="Audio being made in the background"><span id="jobstxt"></span><i class="bar"><b id="jobsbar"></b></i></button>
@@ -80,6 +81,25 @@
 <section id="storage" class="view">
   <div class="bar"><h2>Storage</h2><span class="muted" id="stotal"></span></div>
   <div id="srows"></div>
+</section>
+
+<section id="gpu" class="view">
+  <div class="bar"><h2>GPU &amp; parallel workers</h2>
+    <span class="muted">Ming 0.5B makes one sentence at a time and leaves the GPU half idle, so several copies of the model side by side make more audio per minute. Each copy needs its own memory.</span></div>
+  <div class="tiles">
+    <div class="tile"><div class="k">GPU busy</div><div class="v" id="gutil">–</div><svg id="gspark" viewBox="0 0 240 44" preserveAspectRatio="none"></svg><div class="muted" id="gsparkhint">last 2 minutes</div></div>
+    <div class="tile"><div class="k">Memory free</div><div class="v" id="gfree">–</div><div class="muted" id="gfreesub"></div></div>
+    <div class="tile"><div class="k">Workers</div><div class="v" id="gwork">–</div><div class="muted" id="gworksub"></div></div>
+    <div class="tile"><div class="k">A chapter takes</div><div class="v" id="gch">–</div><div class="muted" id="gchsub"></div></div>
+  </div>
+  <h3>Memory: the GPU and the rest of the Mac share it</h3>
+  <div id="membar"></div>
+  <div id="memleg" class="legend"></div>
+  <h3>How many workers</h3>
+  <div id="wpick" class="wpick"></div>
+  <p class="muted" id="wnote"></p>
+  <h3>Speed by number of workers</h3>
+  <div id="wspeed"></div>
 </section>
 
 <script src="/web/app.js"></script>

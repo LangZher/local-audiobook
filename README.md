@@ -5,14 +5,16 @@ keeps a log of how fast the model is, so every speed-up of the model shows on re
 
 - **Library**: *Find EPUBs on this Mac* (Spotlight, Apple Books, iCloud Drive, Downloads, Documents, Desktop), tick
   the ones you want, *Import*: copies go into one folder, `~/Documents/Audiobook/books`.
-- **Reader**: paginated two-column layout like Apple Books. ▶ reads the page, a faint highlight follows the
-  sentence being read, pages turn on their own. Double-click a sentence to start there. ←/→ turn pages, space plays.
-- **Make audio ahead** for a page, the next 10 pages, a chapter or the whole book in the background (local TTS is slow).
+- **Reader**: paginated two-column layout like Apple Books. ▶ reads the page, a highlight (strength adjustable)
+  follows the sentence being read, pages turn on their own, mid-sentence when a sentence crosses the page. Double-click a sentence to start there. ←/→ turn pages, space plays.
+- **Make audio ahead** for a page, the next 10 pages, a chapter or the whole book in the background (local TTS is slow),
+  with progress, time left, Pause and Cancel at the top.
 - **Voices**: pick the model and its settings, e.g. Ming-3.0-tts IP voices (灵小萌, 灵婉…) or a voice-design
-  description; macOS `say` as an instant baseline.
+  description; macOS `say` as an instant baseline. Each voice says a sample in Chinese and English.
 - **Speed**: RTF and time split per model setup, wall time per job, and a fixed benchmark passage to compare
   versions by ear.
 - **Storage**: size per book × voice, compress to AAC, delete.
+- **GPU**: memory and GPU load, and how many model workers run side by side (3 on a 24 GB Mac: 2× the speed).
 
 Design, model protocol, chunking and preload rules: [DESIGN.md](DESIGN.md). Changes: [CHANGELOG.md](CHANGELOG.md).
 

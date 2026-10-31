@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0 — 2026-10-30
+- Parallel workers: several copies of the model make audio side by side. On an M4 24GB, 3 workers make audio 2×
+  as fast as 1 (throughput RTF 1.01 vs 1.96, measured in the app): faster than listening, so a chapter that took
+  ~40 min takes ~20. Each worker needs ~5 GB; extra workers quit after 90 s without work.
+- GPU tab: GPU busy % with the last 2 minutes, memory bar (model workers / other apps / free, and the GPU limit),
+  how many workers fit, a picker 1…N with the speed and memory of each (★ recommended), how long the open chapter
+  takes, and the measured speed per worker count.
+- The job bar and "time left" count all workers. The voice-design anchor is written atomically (two workers may make
+  it at once).
+
 ## 0.3.1 — 2026-10-30
 - Audio no longer turns robotic after ~30 characters: chunks are now at most 30 characters (was 60). Ming 0.5B
   keeps a voice natural for about that long per generation; past it the voice went mechanical (heard on 灵小柔:

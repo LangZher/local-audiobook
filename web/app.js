@@ -21,7 +21,7 @@ function show(v) {
   view = v;
   document.querySelectorAll("#nav button").forEach(b => b.classList.toggle("on", b.dataset.view === v));
   document.querySelectorAll(".view").forEach(s => s.classList.toggle("on", s.id === v));
-  ({library: loadLibrary, voices: () => { renderVoices(); refreshSamples(); }, bench: loadBench, storage: loadStorage, reader: () => R.book && layout()}[v])();
+  ({library: loadLibrary, gpu: loadGpu, voices: () => { renderVoices(); refreshSamples(); }, bench: loadBench, storage: loadStorage, reader: () => R.book && layout()}[v])();
 }
 document.querySelectorAll("#nav button").forEach(b => b.onclick = () => show(b.dataset.view));
 
@@ -335,7 +335,8 @@ async function poll() {
     const pend = Object.values(q.pending).reduce((a, b) => a + b, 0);
     const w = q.worker;
     let s = w.state === "loading" ? `loading ${w.backend}…` : w.state === "error" ? `⚠ ${w.error}` : w.label ? w.label : "model idle";
-    if (q.current) s = `generating ${q.current.chars} chars (${q.current.elapsed}s of ~${q.current.est_s}s) · ${s}`;
+    if (q.running.length > 1) s = `${q.running.length} workers generating · ${s}`;
+    else if (q.current) s = `generating ${q.current.chars} chars (${q.current.elapsed}s of ~${q.current.est_s}s) · ${s}`;
     if (pend) s += ` · ${pend} waiting`;
     for (const b of q.batches.filter(b => !BG(b) && !["play", "read-ahead"].includes(b.label))) s += ` · ${b.label}: ${b.done + b.cached}/${b.n}`;
     $("#qstat").textContent = s;
@@ -343,10 +344,13 @@ async function poll() {
     if (view === "reader" && R.book) {
       await refreshReady();
       if (R.playing && R.waitingFor && R.ready.has(R.waitingFor)) playChunk(R.waitingFor);
-      else if (R.playing && R.waitingFor && q.current) $("#playstat").textContent = q.current.id === R.waitingFor
-        ? `generating this sentence… ${Math.round(q.current.elapsed)} s of ~${Math.round(q.current.est_s)} s` : "generating… (waiting for the sentence before it)";
+      else if (R.playing && R.waitingFor && q.current) {
+        const c = q.running.find(c => c.id === R.waitingFor && c.book === R.book.id);
+        $("#playstat").textContent = c ? `generating this sentence… ${Math.round(c.elapsed)} s of ~${Math.round(c.est_s)} s` : "generating… (waiting for a worker)";
+      }
     }
     if (view === "voices" && making.size) await refreshSamples();
+    if (view === "gpu") await loadGpu();
   } catch (e) { $("#qstat").textContent = "server not reachable"; }
   setTimeout(poll, 1500);
 }
@@ -441,7 +445,7 @@ function paintSamples() {
     const pid = S.presets[+el.dataset.i]?.id;
     el.querySelectorAll(".vs[data-lang]").forEach(b => {
       if (!pid || S.dirty || !LANGS[b.dataset.lang] || b.textContent.startsWith("Save")) return;
-      const k = `${pid}|${b.dataset.lang}`, cur = lastQ?.current;
+      const k = `${pid}|${b.dataset.lang}`, cur = lastQ?.running.find(c => c.book === "_samples" && c.preset === pid);
       b.classList.toggle("making", making.has(k));
       b.textContent = making.has(k) ? `making ${LANGS[b.dataset.lang]}…${cur?.book === "_samples" && cur.preset === pid ? ` ${Math.round(cur.elapsed)} s of ~${Math.round(cur.est_s)} s` : ""}`
         : `▶ ${LANGS[b.dataset.lang]}`;
@@ -540,6 +544,73 @@ async function loadStorage() {
     const [book, preset] = b.dataset.d.split("|");
     if (confirm("Delete this audio? It can be generated again.")) { await api("/api/delete", {book, preset}); loadStorage(); }
   });
+}
+
+// ---------------- GPU: memory, load, how many workers ----------------
+const gpuHist = [];
+const GB = b => `${(b / 1e9).toFixed(1)} GB`;
+// measured on an M4 24GB, 2026-10-30 (4 chunks per worker, warm): shown until this Mac has its own numbers
+const M4 = {1: 2.21, 3: 1.07, 4: 1.03, 6: 2.01};
+
+async function loadGpu() {
+  const preset = presetId();
+  const s = await api(`/api/system${preset ? `?preset=${preset}` : ""}`);
+  gpuHist.push(s.gpu.util ?? 0); if (gpuHist.length > 80) gpuHist.shift();
+  $("#gutil").textContent = s.gpu.util == null ? "–" : `${s.gpu.util}%`;
+  const W = 240, H = 44, pts = gpuHist.map((v, i) => `${(i * W / 79).toFixed(1)},${(H - 2 - v / 100 * (H - 4)).toFixed(1)}`);
+  $("#gspark").innerHTML = `<line x1="0" y1="${H - 2}" x2="${W}" y2="${H - 2}" stroke="var(--line)" stroke-width="1"/>`
+    + `<polyline points="${pts.join(" ")}" fill="none" stroke="#b88a2e" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>`;
+  $("#gspark").onmousemove = e => {
+    const r = e.currentTarget.getBoundingClientRect(), i = Math.round((e.clientX - r.left) / r.width * 79);
+    const v = gpuHist[Math.min(gpuHist.length - 1, Math.max(0, i))];
+    $("#gsparkhint").textContent = v == null ? "last 2 minutes" : `${v}% busy, ${Math.round((gpuHist.length - 1 - i) * 1.5)} s ago`;
+  };
+  $("#gspark").onmouseleave = () => $("#gsparkhint").textContent = "last 2 minutes";
+
+  const other = Math.max(0, s.ram - s.available - s.ours);
+  $("#gfree").textContent = GB(s.available);
+  $("#gfreesub").textContent = `of ${GB(s.ram)} · workers use ${GB(s.ours)}, other apps ${GB(other)}`;
+  const live = s.workers.filter(w => w.pid);
+  $("#gwork").textContent = `${live.length} of ${s.n}`;
+  $("#gworksub").textContent = live.length < s.n ? "loaded · more start when there is work" : `loaded · ${s.workers.filter(w => w.busy).length} busy now`;
+  const ch = R.book ? R.book.chapters[R.ch].paras.reduce((m, p) => m + p.chunks.reduce((k, x) => k + x.t.length, 0), 0) : 0;
+  if (ch && s.s_per_char) {
+    $("#gch").textContent = `~${fmtS(ch * s.s_per_char[s.n])}`;
+    $("#gchsub").textContent = `this chapter (${ch} chars) with ${s.n} worker${s.n > 1 ? "s" : ""}; with 1: ~${fmtS(ch * s.s_per_char[1])}`;
+  } else { $("#gch").textContent = "–"; $("#gchsub").textContent = "open a book in the Reader"; }
+
+  // memory bar: each worker, other apps, free (the track); dashed line = Metal's GPU limit
+  const pct = b => `${(100 * b / s.ram).toFixed(2)}%`;
+  $("#membar").innerHTML = live.map(w => `<div class="seg w" style="width:${pct(w.bytes)}" title="worker ${w.slot + 1}: ${GB(w.bytes)}${w.busy ? " · generating" : " · idle"}"></div>`).join("")
+    + `<div class="seg o" style="width:${pct(other)}" title="other apps and macOS: ${GB(other)}"></div>`
+    + `<div class="lim" style="left:${pct(s.gpu.budget)}"><span>GPU limit ${GB(s.gpu.budget)}</span></div>`;
+  $("#memleg").innerHTML = `<span><i style="background:#b88a2e"></i>model workers ${GB(s.ours)}</span><span><i style="background:#4f7cc0"></i>other apps and macOS ${GB(other)}</span>`
+    + `<span><i style="background:var(--line)"></i>free ${GB(s.available)}</span><span>one worker ≈ ${GB(s.per_worker)}</span>`;
+
+  // picker: 1..max that fits (+1 shown as over), with the speed each would give
+  const top = Math.min(6, Math.max(s.max + 1, 4));
+  const speed = n => { const m = s.by_n[n], one = s.by_n[1]; return m && one ? (one.gen_s / one.audio_s) / (m.gen_s / m.audio_s / n) : M4[n] ? M4[1] / M4[n] : null; };
+  $("#wpick").innerHTML = Array.from({length: top}, (_, i) => i + 1).map(n => {
+    const sp = speed(n);
+    return `<button data-n="${n}" class="${n === s.n ? "on" : ""} ${n > s.max ? "over" : ""}">${n}${n === s.recommended ? " ★" : ""}
+      <small>${n > s.max ? "won't fit" : sp ? `${sp.toFixed(1)}× speed` : s.s_per_char ? `~${(s.s_per_char[1] / s.s_per_char[n]).toFixed(1)}× speed` : ""} · ${GB(n * s.per_worker)}</small></button>`;
+  }).join("");
+  document.querySelectorAll("#wpick button").forEach(b => b.onclick = async () => {
+    const n = +b.dataset.n;
+    if (n > s.max && !confirm(`${n} workers need about ${GB(n * s.per_worker)}; only ${GB(s.available + s.ours)} is free for them. The Mac will swap and everything gets slower. Use ${n} anyway?`)) return;
+    await api("/api/workers", {n}); loadGpu();
+  });
+  $("#wnote").innerHTML = `★ ${s.recommended} is recommended here: ${Math.min(s.fit_mem, 8)} fit in free memory, ${s.fit_gpu} in the GPU limit,
+    and past 3 the GPU itself is full (on an M4, 4 workers were no faster than 3, and 6 were slower than 2 because the Mac swapped).
+    Extra workers start when there is work and quit after 90 s idle. ▶ Play always goes first.`;
+
+  const rows = Object.keys({...M4, ...s.by_n}).map(Number).sort((a, b) => a - b).map(k => {
+    const m = s.by_n[k];
+    return m ? [k, n(m.chunks), n(`${(m.gen_s / m.chunks).toFixed(1)} s`), n((m.gen_s / m.audio_s).toFixed(2)), n(`<b>${(m.gen_s / m.audio_s / k).toFixed(2)}</b>`), "this Mac"]
+             : [k, n("–"), n("–"), n("–"), n(`<b>${M4[k].toFixed(2)}</b>`), "M4 24GB test"];
+  });
+  $("#wspeed").innerHTML = table(["Workers", "Chunks", "Time per chunk", "RTF per chunk", "RTF together", "Measured on"], rows)
+    + `<p class="muted">RTF together = generation time ÷ audio made, all workers combined; below 1 is faster than listening.</p>`;
 }
 
 // ---------------- start ----------------

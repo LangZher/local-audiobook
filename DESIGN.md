@@ -94,7 +94,7 @@ its current folder.
 
 ## Queue and preload
 
-One model process, one chunk at a time, by priority:
+A pool of model processes (the **GPU** tab sets how many; default 1), each taking the next chunk by priority:
 
 | Priority | Who asks | What |
 |---|---|---|
@@ -102,6 +102,24 @@ One model process, one chunk at a time, by priority:
 | 1 read-ahead | the player, at each new sentence | the next `lookahead` sentences |
 | 0 sample | the Voices page | a short line in Chinese and in English per voice (made on save for a new voice) |
 | 2 preprocess | the Preprocess menu | this page, next 10 pages, this chapter, the whole book |
+
+**Parallel workers.** Ming 0.5B generates batch 1 and is bound by per-step overhead (Python, kernel launches,
+CPU↔GPU syncs), not by the GPU, so N copies of the model side by side make more audio per minute even though each
+chunk gets slower. M4 24GB, warm, 2026-10-30:
+
+| Workers | Throughput RTF (all together) | Speed-up | Memory |
+|---|---|---|---|
+| 1 | 1.96–2.21 | 1× | 4.8–5.8 GB |
+| 3 | 1.01–1.07 | 2.0–2.1× | ~17 GB |
+| 4 | 1.03 | 2.1× (GPU full) | ~19 GB |
+| 6 | 2.01 | worse: the Mac swaps | 28.5 GB |
+
+So 3 is recommended on 24 GB: the first setting faster than listening. The GPU tab shows unified memory (each
+worker's footprint, other apps, free, Metal's 19.1 GB working-set limit), GPU busy % (`ioreg` IOAccelerator, no sudo),
+which counts fit, and the measured speed per count (`runs.jsonl` records `workers`). Extra workers start when there
+is work and quit after 90 s idle; worker 1 stays loaded. Time estimates use the voice's measured seconds per char at
+that worker count, divided by the count. True batching inside one process (shared weights, batch CFG) would use far
+less memory; it needs Ming's sample loop rewritten for batch > 1, and is the next step.
 
 **Pause** (the bar at the top while anything is made ahead) holds priority 2 only: the chunk in progress finishes,
 then nothing is made in the background, while ▶ Play and read-ahead still make what they read. Each job shows its
@@ -147,4 +165,4 @@ biggest target either way.
 
 - `backends/ming_mlx.py`: the MLX port (same protocol, new `label`), then `mx.compile`, fewer flow steps, 4-bit LM.
 - Stream inside a chunk (play the first fragment while the rest generates).
-- Batch two chunks per call (CFG pairs, read-ahead).
+- Batch chunks inside one process (CFG pairs, read-ahead): the parallel speed-up without one model copy per worker.
