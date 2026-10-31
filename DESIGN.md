@@ -70,16 +70,21 @@ ended on half a word, and Ming garbled exactly that end, which sounded like the 
 of each sentence. It applies only to chapters where many long, punctuated lines end without a sentence end, so normal
 books and contents pages stay as they are; `epub.PARSER` makes cached books parse again when this changes.
 
-`epub.split_chunks(text, max_chars=60)`:
+`epub.split_chunks(text, max_chars=30)`:
 
 1. Never cross a paragraph (a paragraph break is a natural pause, and the text layout stays intact).
 2. Split at sentence ends (`。！？!?；;…`, `.` before a space), keeping closing quotes with their sentence.
 3. Merge sentences greedily while the chunk stays ≤ `max_chars` (config `chunk_chars`).
-4. A sentence longer than that is split at commas (`，,、：:`), then cut hard.
+4. A sentence longer than that is split at commas (`，,、：:`); a clause still longer is cut where a word surely ends
+   (`soft_split`: after 的/了/着, before 在/把/被/和…, at quotes and dashes), nearest its middle. Never mid-word: like
+   Ming's own splitter, a clause with no such place stays whole (up to twice `max_chars`).
 
-Joined, the chunks give back the paragraph exactly; each is one `<span>` in the reader. 60 chars ≈ 14 s of speech:
-short enough that the first sound after Play comes quickly, long enough that the per-call overhead and prosody
-breaks stay small. Ming then splits a chunk into ~24-char fragments itself unless `raw_text` is on.
+Joined, the chunks give back the paragraph exactly; each is one `<span>` in the reader. **Why 30**: Ming 0.5B keeps a
+voice natural for about 30 characters per generation; past that it turns mechanical and the speaker's character goes
+(heard on 灵小柔 with raw text, 2026-10-30: "…现在正在头等车厢的吸烟室里，" fine, then "倚角而坐，一边喷着雪茄烟，"
+robotic). Whisper still transcribes such audio correctly, so this is checked by ear, not by ASR. 30 chars ≈ 7 s of
+speech, which also makes the first sound after Play come sooner. Ming splits further into ~24-char fragments itself
+unless `raw_text` is on. Was 60 until v0.3.1; changing it re-chunks every book, so audio is made again.
 
 Audio is stored by **hash of the chunk text** under a **hash of the voice settings**, so re-chunking a book or
 editing a voice never plays the wrong audio: it simply finds nothing and generates again. Fields left at their

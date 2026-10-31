@@ -1,7 +1,7 @@
 {
  "data_dir": "~/Documents/Audiobook",
  "port": 8765,
- "chunk_chars": 60,
+ "chunk_chars": 30,
  "lookahead": 4,
  "scan_dirs": [
   "~/Library/Mobile Documents/iCloud~com~apple~iBooks/Documents",

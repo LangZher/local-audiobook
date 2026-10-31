@@ -2,7 +2,7 @@
 
 An EPUB is either a zip file or (Apple Books, iCloud) a folder with a .epub name; both are read the same way.
 Chunk rule (see DESIGN.md): never cross a paragraph; split at sentence ends; merge sentences up to `max_chars`;
-a sentence longer than that is split at commas, then cut hard.
+a sentence longer than that is split at commas, then at a word boundary (`soft_split`), never mid-word.
 """
 import hashlib
 import posixpath
@@ -137,7 +137,31 @@ SENT = re.compile(rf"[^。！？!?；;…]*?(?:[。！？!?；;]+|…+|\.(?=\s|$
 COMMA = re.compile(rf"[^，,、：:]*[，,、：:][{CLOSE}]*|[^，,、：:]+$")
 
 
-def split_chunks(text, max_chars=60):
+AFTER = set("的了着过地得们")                      # a clause can break after these...
+BEFORE = set("在把被将和与及或对从向往让给并而但却就也都又才还再即便如若")   # ...or before these
+OPEN, SHUT = set("“‘「『《（(—…•·"), set("”’」』》）)—…•·")
+
+
+def soft_split(c, max_chars):
+    """A clause with no comma for more than max_chars: cut it where a word surely ends (after 的/了, before 在/把,
+    at quotes and dashes), nearest the middle. Never mid-word: a chunk that ends on half a word ends badly in the
+    audio too. With no such place it stays whole, like Ming's own splitter does, up to twice the length."""
+    if len(c) <= max_chars:
+        return [c]
+    lo, hi = max(4, len(c) // 4), min(len(c) - 4, len(c) * 3 // 4)
+    cuts = [i for i in range(lo, hi + 1) if c[i - 1] in AFTER or c[i - 1] in SHUT or c[i] in BEFORE or c[i] in OPEN
+            if not (c[i - 1].isascii() and c[i].isascii() and c[i - 1].isalnum() and c[i].isalnum())]
+    if cuts:
+        i = min(cuts, key=lambda i: abs(i - len(c) / 2))
+        return soft_split(c[:i], max_chars) + soft_split(c[i:], max_chars)
+    if len(c) <= 2 * max_chars:
+        return [c]
+    n = -(-len(c) // max_chars)
+    size = -(-len(c) // n)
+    return [c[i:i + size] for i in range(0, len(c), size)]
+
+
+def split_chunks(text, max_chars=30):
     """Sentences merged greedily up to max_chars; never empty, joined they give back `text`."""
     pieces = []
     for s in (m.group(0) for m in SENT.finditer(text)):
@@ -145,11 +169,7 @@ def split_chunks(text, max_chars=60):
             pieces.append(s)
             continue
         for c in (m.group(0) for m in COMMA.finditer(s)):
-            while len(c) > max_chars:
-                pieces.append(c[:max_chars])
-                c = c[max_chars:]
-            if c:
-                pieces.append(c)
+            pieces += soft_split(c, max_chars)
     chunks, cur = [], ""
     for p in pieces:
         if cur and len(cur) + len(p) > max_chars:
@@ -182,7 +202,7 @@ def unwrap(paras):
     Only for chapters that look wrapped (many long lines without an ending), so normal books stay as they are."""
     long = [t for h, t in paras if not h and len(t) >= WRAP_MIN]
     cut = sum(map(wrapped, long))
-    if cut < 10 or cut < 0.3 * len(long):
+    if cut < 10 or cut < 0.2 * len(long):
         return paras
     out = []
     for h, t in paras:
@@ -192,14 +212,15 @@ def unwrap(paras):
             prev[1] += sep + t
         else:
             out.append([h, t, False])
-        out[-1][2] = not out[-1][0] and wrapped(out[-1][1])
+        # in a wrapped chapter any long line that does not end a sentence goes on ("……就是这个海把人拖" | "入深渊")
+        out[-1][2] = not out[-1][0] and len(out[-1][1]) >= WRAP_MIN and not END.search(out[-1][1])
     return [(h, t) for h, t, _ in out]
 
 
-PARSER = 2   # bump when parsing changes, so cached books are parsed again
+PARSER = 3   # bump when parsing changes, so cached books are parsed again
 
 
-def parse(path, max_chars=60):
+def parse(path, max_chars=30):
     """The book as JSON-able data: {id, title, author, chapters: [{title, paras: [{h, chunks: [{id, t}]}]}]}."""
     e = Epub(path)
     toc, chapters = e.toc(), []

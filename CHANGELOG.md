@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1 — 2026-10-30
+- Audio no longer turns robotic after ~30 characters: chunks are now at most 30 characters (was 60). Ming 0.5B
+  keeps a voice natural for about that long per generation; past it the voice went mechanical (heard on 灵小柔:
+  "倚角而坐，一边喷着雪茄烟，"). Every book is re-chunked, so its audio is made again.
+- A clause longer than 30 characters with no comma is cut where a word ends (after 的/了, before 在/把, at quotes
+  and dashes), never mid-word; with no such place it stays whole, as in Ming's own splitter.
+- Hard-wrapped books: all 18 chapters of 无人生还 are now rejoined (two were just under the detection threshold), and
+  lines that end in "……" or "——" are rejoined too.
+
 ## 0.3.0 — 2026-10-30
 - Fix: audio getting worse toward the end of a sentence. In books that put every printed line in its own paragraph
   (无人生还), chunks were cut mid-word ("…倚角而" | "坐，…") and Ming garbled the dangling end (Whisper heard "倚角而"
